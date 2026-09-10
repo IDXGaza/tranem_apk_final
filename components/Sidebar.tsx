@@ -39,6 +39,7 @@ interface SidebarProps {
   showBackupReminder?: boolean;
   onOpenBackup?: () => void;
   onEditTrack?: (track: Track) => void;
+  isLoading?: boolean;
 }
 
 const DropPlaceholder = () => (
@@ -52,7 +53,7 @@ const DropPlaceholder = () => (
 
 const Sidebar: React.FC<SidebarProps> = ({ 
   onImport, onRemove, onMove, onReorderEnd, onToggleSourceType, defaultView, setDefaultView, tracks, currentId, onSelect, onPlayRandom, isOpen = false, onClose,
-  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, className
+  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState<'all' | 'record' | 'import'>(defaultView);
@@ -418,7 +419,19 @@ const Sidebar: React.FC<SidebarProps> = ({
           </div>
           
           <div className="space-y-3">
-            {tracks.length === 0 ? (
+            {isLoading && tracks.length === 0 ? (
+              <div className="space-y-2.5 animate-pulse py-2">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <div key={n} className="flex items-center gap-3 p-2.5 rounded-[22px] bg-slate-100/70 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800/60">
+                    <div className="w-11 h-11 rounded-xl bg-slate-200 dark:bg-slate-800 shrink-0" />
+                    <div className="flex-1 space-y-2 text-right">
+                      <div className="h-3.5 bg-slate-200 dark:bg-slate-800 rounded-md w-3/4 mr-auto" />
+                      <div className="h-2.5 bg-slate-200/70 dark:bg-slate-800/70 rounded-md w-1/2 mr-auto" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : tracks.length === 0 ? (
               <div className="px-6 py-12 text-center bg-slate-50 dark:bg-slate-900/50 rounded-3xl border-2 border-dashed border-slate-100 dark:border-slate-800">
                 <Music className="w-8 h-8 text-slate-300 dark:text-slate-700 mx-auto mb-3 opacity-50" />
                 <p className="text-[10px] text-slate-400 font-bold">لا توجد ملفات حالياً</p>

@@ -151,6 +151,9 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
         if (storedToken) {
           return storedToken;
         }
+
+        // Do NOT trigger interactive signIn in background mode
+        throw new Error('ExpiredToken');
       }
 
       let user: any = null;

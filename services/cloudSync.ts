@@ -13,10 +13,19 @@ const DB_NAME = 'TraneemDB';
 const STORE_NAME = 'tracks';
 
 // Simple self-contained IndexedDB helpers for cloudSync to avoid circular imports
+let syncDbInstance: IDBDatabase | null = null;
 const getSyncDB = (): Promise<IDBDatabase> => {
+  if (syncDbInstance) return Promise.resolve(syncDbInstance);
   return new Promise((resolve, reject) => {
     const request = window.indexedDB.open(DB_NAME, 1);
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      syncDbInstance = request.result;
+      syncDbInstance.onversionchange = () => {
+        syncDbInstance?.close();
+        syncDbInstance = null;
+      };
+      resolve(syncDbInstance);
+    };
     request.onerror = () => reject(request.error);
   });
 };

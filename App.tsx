@@ -224,6 +224,8 @@ const getTrackFromDB = async (id: string): Promise<any> => {
 
 const updateTracksMetaCache = (trackList: Track[]) => {
   try {
+    if (!Array.isArray(trackList) || trackList.length === 0) return;
+
     const metaList = trackList.map(t => ({
       id: t.id,
       name: t.name,
@@ -235,8 +237,8 @@ const updateTracksMetaCache = (trackList: Track[]) => {
       sourceType: t.sourceType,
       playCount: t.playCount,
       listenTime: t.listenTime,
-      url: t.audioUrl || '',
-      coverUrl: t.coverUrl || UNIFORM_PLACEHOLDER
+      url: (t.url && !t.url.startsWith('blob:')) ? t.url : (t.audioUrl || ''),
+      coverUrl: (t.coverUrl && !t.coverUrl.startsWith('blob:')) ? t.coverUrl : UNIFORM_PLACEHOLDER
     }));
     localStorage.setItem('traneem_meta_cache', JSON.stringify(metaList));
   } catch (e) {
@@ -248,21 +250,44 @@ const App: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>(() => {
     try {
       const cached = localStorage.getItem('traneem_meta_cache');
-      return cached ? JSON.parse(cached) : [];
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
     } catch {
       return [];
     }
+    return [];
   });
+
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(() => {
+    try {
+      const cached = localStorage.getItem('traneem_meta_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return false;
+        }
+      }
+    } catch {}
+    return true;
+  });
+
   const [currentTrackIndex, setCurrentTrackIndex] = useState<number | null>(() => {
     try {
       const cached = localStorage.getItem('traneem_meta_cache');
       const list = cached ? JSON.parse(cached) : [];
-      const restoredId = localStorage.getItem('lastPlayedTrackId');
-      const idx = list.findIndex((t: any) => t.id === restoredId);
-      return idx !== -1 ? idx : (list.length > 0 ? 0 : null);
+      if (Array.isArray(list) && list.length > 0) {
+        const restoredId = localStorage.getItem('lastPlayedTrackId');
+        const idx = list.findIndex((t: any) => t.id === restoredId);
+        return idx !== -1 ? idx : 0;
+      }
     } catch {
       return null;
     }
+    return null;
   });
 
   // Request storage persistence and track application usage & opens
@@ -839,7 +864,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
     timer = setTimeout(() => {
       checkAndInitSync();
-    }, 1200);
+    }, 3500);
 
     return () => clearTimeout(timer);
   }, [user, isSkipLogin]);
@@ -990,6 +1015,28 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
   const currentTrack = currentTrackIndex !== null ? tracks[currentTrackIndex] : null;
 
+  // Fast hydration: load the active track's audio blob immediately so it is ready within 15ms
+  useEffect(() => {
+    if (currentTrack && (!currentTrack.url || currentTrack.url === '' || (currentTrack.url.startsWith('http') && !currentTrack.audioUrl))) {
+      if (!currentTrack.fileBlob) {
+        getTrackFromDB(currentTrack.id).then(fullTrack => {
+          if (fullTrack?.fileBlob) {
+            const playUrl = URL.createObjectURL(fullTrack.fileBlob);
+            const coverUrl = fullTrack.coverBlob ? URL.createObjectURL(fullTrack.coverBlob) : undefined;
+            setTracks(prev => prev.map(t => t.id === currentTrack.id ? {
+              ...t,
+              fileBlob: fullTrack.fileBlob,
+              url: playUrl,
+              ...(coverUrl ? { coverBlob: fullTrack.coverBlob, coverUrl } : {})
+            } : t));
+          }
+        }).catch(err => {
+          console.warn("Fast track hydration error:", err);
+        });
+      }
+    }
+  }, [currentTrack?.id]);
+
   useEffect(() => {
     if (!playerState.isPlaying || !currentTrack) {
        lastStatsUpdateRef.current = 0;
@@ -1086,31 +1133,39 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, []);
 
   useEffect(() => {
+    let isCancelled = false;
     const loadLocalData = async () => {
       try {
         const savedTracks = await getAllTracksFromDB();
+        if (isCancelled) return;
         const sortedTracks = savedTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
         const tracksWithUrls = sortedTracks.map(t => ({
           ...t,
           url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
           coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
         }));
+        
         setTracks(tracksWithUrls);
+        updateTracksMetaCache(tracksWithUrls);
+        setIsInitialLoading(false);
+
         const restoredId = localStorage.getItem('lastPlayedTrackId');
         const restoredIndex = tracksWithUrls.findIndex(t => t.id === restoredId);
         if (restoredIndex !== -1) {
           setCurrentTrackIndex(restoredIndex);
         } else if (tracksWithUrls.length > 0) {
-          setCurrentTrackIndex(0);
+          setCurrentTrackIndex(prev => prev !== null ? prev : 0);
         }
       } catch (e) {
         console.error("Failed to load tracks from DB", e);
+        setIsInitialLoading(false);
       }
     };
     loadLocalData();
+    return () => { isCancelled = true; };
   }, []);
 
-  const handleSelectTrack = useCallback((index: number) => {
+  const handleSelectTrack = useCallback(async (index: number) => {
     const track = tracks[index];
     if (!track) return;
     
@@ -1124,14 +1179,29 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     setPlayerState(prev => ({ ...prev, isPlaying: true, currentTime: 0 }));
     updateMediaSession(true);
     
+    let playUrl = track.url;
+    if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
+      if (!track.fileBlob) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
+          }
+        } catch (e) {
+          console.warn("Failed to get track audio blob:", e);
+        }
+      }
+    }
+
     // Attempt play immediately to capture user gesture
     if (audioRef.current) {
       initAudioCtx();
-      // Syncing manually here ensures the browser immediately sees the play intent
-      // linked to the actual user tap, bypassing any React async render gaps.
       try {
-        audioRef.current.src = track.url || "";
-        audioRef.current.load(); // Ensure new src is loaded
+        if (playUrl) {
+          audioRef.current.src = playUrl;
+          audioRef.current.load();
+        }
         
         const playPromise = audioRef.current.play();
         if (playPromise !== undefined) {
@@ -1197,25 +1267,44 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const audio = audioRef.current;
     if (!audio) return;
     initAudioCtx();
-    
-
 
     if (playerState.isPlaying) {
       audio.pause();
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
       updateMediaSession(false);
-    } else {
-      setPlayerState(prev => ({ ...prev, isPlaying: true }));
-      updateMediaSession(true);
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(error => {
-          setPlayerState(prev => ({ ...prev, isPlaying: false }));
-          if (error.name !== 'NotAllowedError') {
-            console.error(error);
+      return;
+    }
+
+    // Ensure audio src is loaded if not already
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && currentTrack) {
+      let playUrl = currentTrack.url;
+      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !currentTrack.audioUrl)) {
+        try {
+          const full = await getTrackFromDB(currentTrack.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === currentTrack.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
           }
-        });
+        } catch (e) {
+          console.warn("PlayPause get blob error:", e);
+        }
       }
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
+      }
+    }
+
+    setPlayerState(prev => ({ ...prev, isPlaying: true }));
+    updateMediaSession(true);
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(error => {
+        setPlayerState(prev => ({ ...prev, isPlaying: false }));
+        if (error.name !== 'NotAllowedError') {
+          console.error(error);
+        }
+      });
     }
   };
 
@@ -1826,6 +1915,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
                 setIsDriveModalOpen(true);
               }}
               onEditTrack={handleOpenEditModal}
+              isLoading={isInitialLoading}
               className="fixed inset-y-0 right-0 h-full w-[85%] sm:w-[400px] shadow-2xl z-[200] lg:!relative lg:!w-full lg:!shadow-none lg:!z-10 lg:!inset-auto"
             />
           </div>
@@ -1891,6 +1981,19 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
                   <TimestampManager timestamps={currentTrack.timestamps} onRemove={handleRemoveTimestamp} onSeek={handleTimestampSeek} currentTime={playerState.currentTime} />
                 </div>
                 <div className="h-64 md:h-80 shrink-0 w-full" aria-hidden="true" />
+              </div>
+            ) : isInitialLoading ? (
+              <div className="h-[60vh] flex flex-col items-center justify-center space-y-6 text-center px-6 animate-pulse">
+                <div className="w-20 h-20 bg-[#4da8ab]/10 rounded-[28px] flex items-center justify-center text-[#4da8ab] shadow-lg shadow-[#4da8ab]/10">
+                  <svg className="w-10 h-10 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                </div>
+                <div className="space-y-2">
+                  <h2 className="text-xl font-black text-[#4da8ab]">جاري تجهيز أناشيدك...</h2>
+                  <p className="text-xs text-slate-400 font-bold">لحظات ويتم تحميل مكتبتك الصوتية بالكامل</p>
+                </div>
               </div>
             ) : (
               <div className="h-[60vh] flex flex-col items-center justify-center space-y-6 text-center px-6 opacity-30">
