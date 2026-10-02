@@ -444,58 +444,6 @@ public class MediaSessionPlugin extends Plugin {
                             mediaSession.setMetadata(metadataBuilder.build());
                         }
                         updatePlaybackStateInternal(isPlaying, position);
-
-                        AudioManager audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-                        if (audioManager != null) {
-                            if (isPlaying) {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                    AudioFocusRequest focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                                        .setAudioAttributes(
-                                            new AudioAttributes.Builder()
-                                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                                .build()
-                                        )
-                                        .setWillPauseWhenDucked(true)
-                                        .setAcceptsDelayedFocusGain(true)
-                                        .setOnAudioFocusChangeListener(new AudioManager.OnAudioFocusChangeListener() {
-                                            @Override
-                                            public void onAudioFocusChange(int focusChange) {
-                                                if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                                                    getActivity().runOnUiThread(new Runnable() {
-                                                        @Override
-                                                        public void run() {
-                                                            JSObject obj = new JSObject();
-                                                            obj.put("action", "pause");
-                                                            notifyListeners("mediaAction", obj);
-                                                        }
-                                                    });
-                                                } else if (focusChange == AudioManager.AUDIOFOCUS_GAIN) {
-                                                    getActivity().runOnUiThread(new Runnable() {
-                                                        @Override
-                                                        public void run() {
-                                                            JSObject obj = new JSObject();
-                                                            obj.put("action", "play");
-                                                            notifyListeners("mediaAction", obj);
-                                                        }
-                                                    });
-                                                }
-                                            }
-                                        })
-                                        .build();
-                                    audioFocusRequest = focusRequest;
-                                    audioManager.requestAudioFocus(focusRequest);
-                                }
-                            } else {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                    if (audioFocusRequest != null) {
-                                        audioManager.abandonAudioFocusRequest(audioFocusRequest);
-                                        audioFocusRequest = null;
-                                    }
-                                }
-                            }
-                        }
-
                         showNotification(title, artist, finalBitmap, isPlaying);
                     }
                 });

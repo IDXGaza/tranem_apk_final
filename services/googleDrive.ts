@@ -160,7 +160,37 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
       try {
         user = await GoogleAuth.signIn() as any;
       } catch (nativeSignErr: any) {
-        console.warn('Native GoogleAuth.signIn failed:', nativeSignErr);
+        console.warn('Native GoogleAuth.signIn failed, attempting Firebase Auth fallback:', nativeSignErr);
+        try {
+          const { auth } = await import('../firebase');
+          const { signInWithPopup, GoogleAuthProvider } = await import('firebase/auth');
+          
+          const provider = new GoogleAuthProvider();
+          provider.addScope('https://www.googleapis.com/auth/drive.appdata');
+          provider.setCustomParameters({ prompt: 'select_account' });
+          
+          const result = await signInWithPopup(auth, provider);
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          const accessToken = credential?.accessToken;
+          
+          if (accessToken) {
+            localStorage.setItem('google_access_token', accessToken);
+            localStorage.setItem('google_token_acquired_at', Date.now().toString());
+
+            if (result.user) {
+              const traneemUser = {
+                displayName: result.user.displayName || 'مستخدم ترانيم',
+                email: result.user.email || '',
+                photoURL: result.user.photoURL || '',
+                uid: result.user.uid || ('user_' + Date.now())
+              };
+              localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
+            }
+            return accessToken;
+          }
+        } catch (fbFallbackErr) {
+          console.warn('Firebase fallback also failed:', fbFallbackErr);
+        }
         throw nativeSignErr;
       }
 
