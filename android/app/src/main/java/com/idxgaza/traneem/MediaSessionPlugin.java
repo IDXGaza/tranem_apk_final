@@ -98,13 +98,13 @@ public class MediaSessionPlugin extends Plugin {
                 public void run() {
                     JSObject obj = new JSObject();
                     if (headsetClickCount == 1) {
-                        obj.put("action", "toggle");
+                        obj.put("action", "single_tap");
                         notifyListeners("mediaAction", obj);
                     } else if (headsetClickCount == 2) {
-                        obj.put("action", "next");
+                        obj.put("action", "double_tap");
                         notifyListeners("mediaAction", obj);
                     } else if (headsetClickCount >= 3) {
-                        obj.put("action", "previous");
+                        obj.put("action", "triple_tap");
                         notifyListeners("mediaAction", obj);
                     }
                     headsetClickCount = 0;

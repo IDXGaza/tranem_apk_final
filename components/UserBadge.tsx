@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { LogOut, RefreshCw, BarChart2, X, User, Cloud, Share2, Shield, FolderHeart } from 'lucide-react';
+import { LogOut, RefreshCw, BarChart2, X, User, Cloud, Share2, Shield, FolderHeart, ShieldCheck, RotateCcw } from 'lucide-react';
 import { SyncProgress } from '../services/cloudSync';
 import { Track } from '../types';
 import StatsWidget from './StatsWidget';
@@ -21,6 +21,8 @@ interface UserBadgeProps {
   isLoggingIn: boolean;
   loginError?: string | null;
   onShareApp?: () => void;
+  storagePersisted?: boolean;
+  onRestoreSafetyVault?: () => Promise<void>;
 }
 
 export const UserBadge: React.FC<UserBadgeProps> = ({ 
@@ -33,9 +35,13 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
   onGoogleLogin,
   isLoggingIn,
   loginError,
-  onShareApp
+  onShareApp,
+  storagePersisted = false,
+  onRestoreSafetyVault
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [vaultRestoring, setVaultRestoring] = useState(false);
+  const [vaultStatus, setVaultStatus] = useState<string | null>(null);
 
   // Disable body scroll when full-screen profile page is open
   useEffect(() => {
@@ -48,6 +54,21 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
       document.body.style.overflow = '';
     };
   }, [isOpen]);
+
+  const handleTriggerRestoreVault = async () => {
+    if (!onRestoreSafetyVault) return;
+    setVaultRestoring(true);
+    setVaultStatus('جاري استرجاع الأناشيد من مستودع الأمان الاحتياطي...');
+    try {
+      await onRestoreSafetyVault();
+      setVaultStatus('تمت استعادة الأناشيد بنجاح! ✅');
+    } catch (e: any) {
+      setVaultStatus(e?.message || 'لا توجد أناشيد لاستعادتها');
+    } finally {
+      setVaultRestoring(false);
+      setTimeout(() => setVaultStatus(null), 4000);
+    }
+  };
 
   const getSyncIcon = () => {
     if (!user) return null;
@@ -157,7 +178,7 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                 <div className="flex items-center gap-2">
                   <User className="w-5.5 h-5.5 text-[#4da8ab]" />
                   <h2 className="text-base font-black text-slate-900 dark:text-slate-100">
-                    حسابي ونشاطي
+                    الحساب والإعدادات
                   </h2>
                 </div>
                 <button 
@@ -210,7 +231,7 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                       <div className="space-y-1">
                         <h3 className="font-black text-sm text-slate-900 dark:text-slate-100">حساب محلي (غير متصل بالسحاب)</h3>
                         <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed font-semibold">
-                          بياناتك وأناشيدك محفوظة حالياً على هذا المتصفح فقط. يرجى ربط حسابك في جوجل لتفعيل المزامنة السحابية والحفاظ على مكتبتك آمنة وتزامنها مع أجهزتك الأخرى تلقائياً.
+                          بياناتك وأناشيدك محفوظة حالياً على هذا الجهاز. يمكنك ربط حسابك في جوجل لتفعيل المزامنة السحابية وحفظ مكتبتك دائماً بأمان.
                         </p>
                       </div>
                     </div>
@@ -239,6 +260,44 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                 <div className="space-y-2">
                   <h3 className="text-xs font-black text-slate-450 dark:text-slate-500 uppercase tracking-wider mr-1">إحصائيات النشاط</h3>
                   <StatsWidget tracks={tracks} />
+                </div>
+
+                {/* مستودع الأمان ودرع حفظ الأناشيد التلقائي */}
+                <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-150 dark:border-slate-800/80 shadow-sm space-y-3.5 text-right">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800/60 pb-3">
+                    <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100">
+                      <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                      <div>
+                        <span className="text-xs font-black">مستودع الأمان ودرع الحفظ</span>
+                        <p className="text-[10px] text-slate-400">حماية الأناشيد من الحذف العشوائي</p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-xl border border-emerald-500/20">
+                      {storagePersisted ? 'تخزين دائم محمي ✅' : 'الحماية التلقائية نشطة 🛡️'}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                    يحافظ درع الحفظ التلقائي على ملفاتك في التخزين الدائم لمنع نظام التشغيل من مسحها عند انخفاض الذاكرة، كما يوفر مستودع الأمان نسخة طوارئ إضافية.
+                  </p>
+
+                  {onRestoreSafetyVault && (
+                    <div className="pt-1 flex flex-col gap-2">
+                      <button
+                        onClick={handleTriggerRestoreVault}
+                        disabled={vaultRestoring}
+                        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 px-4 rounded-xl text-xs font-black transition-all duration-200 active:scale-95 disabled:opacity-50 cursor-pointer shadow-sm shadow-emerald-600/15"
+                      >
+                        <RotateCcw className={`w-3.5 h-3.5 ${vaultRestoring ? 'animate-spin' : ''}`} />
+                        <span>{vaultRestoring ? 'جاري الاسترجاع...' : 'استرجاع الأناشيد من مستودع الأمان'}</span>
+                      </button>
+                      {vaultStatus && (
+                        <span className="text-xs font-bold text-center text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 p-2 rounded-xl">
+                          {vaultStatus}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Cloud Sync Status and Manual Controls (If Logged-in) */}
@@ -288,7 +347,7 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                 <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-150 dark:border-slate-800/80 shadow-sm space-y-3.5 text-right">
                   <h3 className="text-xs font-black text-slate-800 dark:text-slate-100 flex items-center gap-2 border-b border-slate-100 dark:border-slate-800/60 pb-3">
                     <Shield className="w-4.5 h-4.5 text-[#4da8ab]" />
-                    <span>إجراءات سريعة وأدوات</span>
+                    <span>إجراءات سريعة والنسخ الاحتياطي</span>
                   </h3>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

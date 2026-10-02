@@ -30,7 +30,14 @@ import { useAudioRecorder } from './hooks/useAudioRecorder';
 import GoogleDriveBackupModal from './components/GoogleDriveBackupModal';
 import ImageCropperModal from './components/ImageCropperModal';
 import { ShareTrackModal } from './components/ShareTrackModal';
-import { HeadphoneControlsModal, SoundProfile } from './components/HeadphoneControlsModal';
+import {
+  HeadphoneControlsModal,
+  SoundProfile,
+  HeadphoneGestureSettings,
+  DEFAULT_HEADPHONE_GESTURES,
+  HeadphoneActionType,
+  CustomEqSettings
+} from './components/HeadphoneControlsModal';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Headphones } from 'lucide-react';
 
@@ -104,13 +111,39 @@ const App: React.FC = () => {
   const [soundProfile, setSoundProfile] = useState<SoundProfile>(() => {
     return (localStorage.getItem('traneem_sound_profile') as SoundProfile) || 'balanced';
   });
+
+  const [customEq, setCustomEq] = useState<CustomEqSettings>(() => {
+    try {
+      const cached = localStorage.getItem('traneem_custom_eq');
+      return cached ? JSON.parse(cached) : { bass: 0, mid: 0, treble: 0, gain: 1.0 };
+    } catch {
+      return { bass: 0, mid: 0, treble: 0, gain: 1.0 };
+    }
+  });
+
+  const [gestureSettings, setGestureSettings] = useState<HeadphoneGestureSettings>(() => {
+    try {
+      const cached = localStorage.getItem('traneem_headphone_gestures');
+      return cached ? { ...DEFAULT_HEADPHONE_GESTURES, ...JSON.parse(cached) } : DEFAULT_HEADPHONE_GESTURES;
+    } catch {
+      return DEFAULT_HEADPHONE_GESTURES;
+    }
+  });
+
+  const gestureSettingsRef = useRef<HeadphoneGestureSettings>(gestureSettings);
+  useEffect(() => {
+    gestureSettingsRef.current = gestureSettings;
+  }, [gestureSettings]);
+
   const [storagePersisted, setStoragePersisted] = useState(false);
   const [vaultNotice, setVaultNotice] = useState<string | null>(null);
 
   const bassFilterRef = useRef<BiquadFilterNode | null>(null);
+  const midBassFilterRef = useRef<BiquadFilterNode | null>(null);
   const midFilterRef = useRef<BiquadFilterNode | null>(null);
   const trebleFilterRef = useRef<BiquadFilterNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const compressorRef = useRef<DynamicsCompressorNode | null>(null);
 
   // Request storage persistence and track application usage & opens
   useEffect(() => {
@@ -935,40 +968,66 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     startRecording();
   };
 
-  const applySoundProfile = useCallback((profile: SoundProfile) => {
+  const applySoundProfile = useCallback((profile: SoundProfile, customSettings?: CustomEqSettings) => {
     setSoundProfile(profile);
     localStorage.setItem('traneem_sound_profile', profile);
 
     const bass = bassFilterRef.current;
+    const midBass = midBassFilterRef.current;
     const mid = midFilterRef.current;
     const treble = trebleFilterRef.current;
     const gain = gainNodeRef.current;
     const ctx = audioCtxRef.current;
 
-    if (!bass || !mid || !treble || !gain || !ctx) return;
+    if (!bass || !midBass || !mid || !treble || !gain || !ctx) return;
     const now = ctx.currentTime;
 
     if (profile === 'balanced') {
       bass.gain.setValueAtTime(0, now);
+      midBass.gain.setValueAtTime(0, now);
       mid.gain.setValueAtTime(0, now);
       treble.gain.setValueAtTime(0, now);
       gain.gain.setValueAtTime(1.0, now);
     } else if (profile === 'vocal') {
-      bass.gain.setValueAtTime(-1.5, now);
-      mid.gain.setValueAtTime(5.0, now);
-      treble.gain.setValueAtTime(1.5, now);
-      gain.gain.setValueAtTime(1.0, now);
+      // Vocal clarity mode: cut low mud, huge boost to vocal intelligibility & crisp highs
+      bass.gain.setValueAtTime(-6.0, now);
+      midBass.gain.setValueAtTime(-3.0, now);
+      mid.gain.setValueAtTime(12.0, now);
+      treble.gain.setValueAtTime(6.0, now);
+      gain.gain.setValueAtTime(1.1, now);
     } else if (profile === 'bass') {
-      bass.gain.setValueAtTime(7.0, now);
+      // Ultra deep punchy bass: heavy sub-bass & thumping mid-bass
+      bass.gain.setValueAtTime(15.0, now);
+      midBass.gain.setValueAtTime(8.0, now);
       mid.gain.setValueAtTime(0, now);
-      treble.gain.setValueAtTime(-1.0, now);
+      treble.gain.setValueAtTime(-2.0, now);
       gain.gain.setValueAtTime(1.0, now);
     } else if (profile === 'boost') {
-      bass.gain.setValueAtTime(1.5, now);
-      mid.gain.setValueAtTime(2.0, now);
-      treble.gain.setValueAtTime(1.5, now);
-      gain.gain.setValueAtTime(1.3, now);
+      // Master amplification mode: high gain with balanced frequency punch
+      bass.gain.setValueAtTime(4.0, now);
+      midBass.gain.setValueAtTime(3.0, now);
+      mid.gain.setValueAtTime(4.0, now);
+      treble.gain.setValueAtTime(4.0, now);
+      gain.gain.setValueAtTime(1.7, now);
+    } else if (profile === 'custom') {
+      const eq = customSettings || customEq;
+      bass.gain.setValueAtTime(eq.bass, now);
+      midBass.gain.setValueAtTime(eq.bass * 0.5, now);
+      mid.gain.setValueAtTime(eq.mid, now);
+      treble.gain.setValueAtTime(eq.treble, now);
+      gain.gain.setValueAtTime(eq.gain, now);
     }
+  }, [customEq]);
+
+  const handleCustomEqChange = useCallback((eq: CustomEqSettings) => {
+    setCustomEq(eq);
+    localStorage.setItem('traneem_custom_eq', JSON.stringify(eq));
+    applySoundProfile('custom', eq);
+  }, [applySoundProfile]);
+
+  const handleGestureSettingsChange = useCallback((settings: HeadphoneGestureSettings) => {
+    setGestureSettings(settings);
+    localStorage.setItem('traneem_headphone_gestures', JSON.stringify(settings));
   }, []);
 
   const initAudioCtx = useCallback(() => {
@@ -986,33 +1045,54 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       const source = ctx.createMediaElementSource(audioRef.current);
       sourceRef.current = source;
 
-      // Equalizer nodes for headphone and audio profiles
+      // 1. Deep Sub-bass filter (80Hz)
       const bass = ctx.createBiquadFilter();
       bass.type = 'lowshelf';
-      bass.frequency.value = 120;
+      bass.frequency.value = 80;
       bassFilterRef.current = bass;
 
+      // 2. Punchy Mid-bass filter (200Hz)
+      const midBass = ctx.createBiquadFilter();
+      midBass.type = 'peaking';
+      midBass.frequency.value = 200;
+      midBass.Q.value = 1.0;
+      midBassFilterRef.current = midBass;
+
+      // 3. Vocal Clarity filter (2800Hz)
       const mid = ctx.createBiquadFilter();
       mid.type = 'peaking';
-      mid.frequency.value = 2500;
-      mid.Q.value = 1.0;
+      mid.frequency.value = 2800;
+      mid.Q.value = 1.2;
       midFilterRef.current = mid;
 
+      // 4. Treble / Air filter (8000Hz)
       const treble = ctx.createBiquadFilter();
       treble.type = 'highshelf';
-      treble.frequency.value = 7000;
+      treble.frequency.value = 8000;
       trebleFilterRef.current = treble;
 
+      // 5. Master Gain Node
       const gain = ctx.createGain();
       gain.gain.value = 1.0;
       gainNodeRef.current = gain;
 
-      // Connect graph: source -> bass -> mid -> treble -> gain -> destination
+      // 6. Dynamic Limiter / Studio Compressor (prevents clipping & distortion when bass or volume is boosted)
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-6, ctx.currentTime);
+      compressor.knee.setValueAtTime(10, ctx.currentTime);
+      compressor.ratio.setValueAtTime(4, ctx.currentTime);
+      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
+      compressor.release.setValueAtTime(0.25, ctx.currentTime);
+      compressorRef.current = compressor;
+
+      // Connect graph: source -> bass -> midBass -> mid -> treble -> gain -> compressor -> destination
       source.connect(bass);
-      bass.connect(mid);
+      bass.connect(midBass);
+      midBass.connect(mid);
       mid.connect(treble);
       treble.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(compressor);
+      compressor.connect(ctx.destination);
 
       applySoundProfile(soundProfile);
     } catch (e) {
@@ -1483,6 +1563,70 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
   };
 
+  const executeHeadphoneAction = useCallback((actionType: HeadphoneActionType) => {
+    switch (actionType) {
+      case 'toggle': {
+        const audio = audioRef.current;
+        const actuallyPlaying = audio && !audio.paused && !audio.ended && audio.readyState > 2;
+        if (actuallyPlaying) {
+          handlePause();
+        } else {
+          handlePlay();
+        }
+        break;
+      }
+      case 'next':
+        handleSkipToNext();
+        break;
+      case 'previous': {
+        const currentIdx = currentTrackIndexRef.current;
+        const currentTracks = tracksRef.current;
+        if (currentIdx !== null && currentTracks.length > 0) {
+          if (currentIdx > 0) {
+            handleSelectTrack(currentIdx - 1);
+          } else {
+            handleSelectTrack(currentTracks.length - 1);
+          }
+        }
+        break;
+      }
+      case 'seek_forward_10':
+        handleSkip(10);
+        break;
+      case 'seek_forward_30':
+        handleSkip(30);
+        break;
+      case 'seek_backward_10':
+        handleSkip(-10);
+        break;
+      case 'seek_backward_30':
+        handleSkip(-30);
+        break;
+      case 'restart':
+        handleSeek(0);
+        break;
+      case 'shuffle':
+        handleShuffle();
+        break;
+      case 'volume_up':
+        setPlayerState(prev => {
+          const nextVol = Math.min(1, Number((prev.volume + 0.15).toFixed(2)));
+          if (audioRef.current) audioRef.current.volume = nextVol;
+          return { ...prev, volume: nextVol };
+        });
+        break;
+      case 'volume_down':
+        setPlayerState(prev => {
+          const nextVol = Math.max(0, Number((prev.volume - 0.15).toFixed(2)));
+          if (audioRef.current) audioRef.current.volume = nextVol;
+          return { ...prev, volume: nextVol };
+        });
+        break;
+      case 'none':
+        break;
+    }
+  }, [handlePause, handlePlay, handleSkipToNext, handleSelectTrack, handleSkip, handleSeek, handleShuffle]);
+
   // Media Session logic
   useEffect(() => {
     if (!('mediaSession' in navigator) || !currentTrack) return;
@@ -1514,10 +1658,13 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           ['play', handlePlay],
           ['pause', handlePause],
           ['previoustrack', () => {
-            if (currentTrackIndex !== null && currentTrackIndex > 0) handleSelectTrack(currentTrackIndex - 1);
-            else if (currentTrackIndex === 0 && tracks.length > 0) handleSelectTrack(tracks.length - 1);
+            const act = gestureSettingsRef.current.prevButton;
+            executeHeadphoneAction(act);
           }],
-          ['nexttrack', handleSkipToNext],
+          ['nexttrack', () => {
+            const act = gestureSettingsRef.current.nextButton;
+            executeHeadphoneAction(act);
+          }],
           ['seekto', (details) => { if (details.seekTime !== undefined) handleSeek(details.seekTime); }],
           ['seekbackward', (details) => handleSkip(-(details.seekOffset || 10))],
           ['seekforward', (details) => handleSkip(details.seekOffset || 10)],
@@ -1537,7 +1684,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     };
 
     setupMediaSession();
-  }, [currentTrack?.id, currentTrack?.name, currentTrack?.coverUrl, playerState.isPlaying, handlePlay, handlePause, handleSelectTrack, handleSkipToNext, handleSeek, handleSkip, currentTrackIndex, tracks.length]);
+  }, [currentTrack?.id, currentTrack?.name, currentTrack?.coverUrl, playerState.isPlaying, handlePlay, handlePause, executeHeadphoneAction, handleSeek, handleSkip]);
 
   useEffect(() => {
     if (currentTrack) {
@@ -1556,30 +1703,22 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           if (!active) return;
           console.log('Got MediaSession Action:', data.action, data.position);
           
-          if (data.action === 'play') {
+          if (data.action === 'single_tap') {
+            executeHeadphoneAction(gestureSettingsRef.current.singleTap);
+          } else if (data.action === 'double_tap') {
+            executeHeadphoneAction(gestureSettingsRef.current.doubleTap);
+          } else if (data.action === 'triple_tap') {
+            executeHeadphoneAction(gestureSettingsRef.current.tripleTap);
+          } else if (data.action === 'next') {
+            executeHeadphoneAction(gestureSettingsRef.current.nextButton);
+          } else if (data.action === 'previous') {
+            executeHeadphoneAction(gestureSettingsRef.current.prevButton);
+          } else if (data.action === 'toggle') {
+            executeHeadphoneAction(gestureSettingsRef.current.singleTap);
+          } else if (data.action === 'play') {
             handlePlay();
           } else if (data.action === 'pause') {
             handlePause();
-          } else if (data.action === 'toggle') {
-            const audio = audioRef.current;
-            const actuallyPlaying = audio && !audio.paused && !audio.ended && audio.readyState > 2;
-            if (actuallyPlaying) {
-              handlePause();
-            } else {
-              handlePlay();
-            }
-          } else if (data.action === 'next') {
-            handleSkipToNext();
-          } else if (data.action === 'previous') {
-            const currentIdx = currentTrackIndexRef.current;
-            const currentTracks = tracksRef.current;
-            if (currentIdx !== null) {
-              if (currentIdx > 0) {
-                handleSelectTrack(currentIdx - 1);
-              } else if (currentIdx === 0 && currentTracks.length > 0) {
-                handleSelectTrack(currentTracks.length - 1);
-              }
-            }
           } else if (data.action === 'stop') {
             handlePause();
           } else if (data.action === 'seek' && typeof data.position === 'number') {
@@ -1612,7 +1751,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         }
       };
     }
-  }, [handlePlay, handlePause, handleSkipToNext, handleSelectTrack, handleSeek]);
+  }, [handlePlay, handlePause, executeHeadphoneAction, handleSeek]);
 
   // Periodic headphone connection state polling and devicechange listener
   useEffect(() => {
@@ -2107,20 +2246,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
         <div className="flex items-center gap-1 md:gap-3">
           <button
-            onClick={() => requestPlaybackNotificationPermission()}
-            className={`p-2 rounded-xl transition-all flex items-center justify-center ${
-              hasNotificationPermission 
-                ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20' 
-                : 'text-amber-500 bg-amber-500/10 hover:bg-amber-500/20 ring-1 ring-amber-500/30'
-            }`}
-            title={hasNotificationPermission ? "إشعارات التحكم في شريط الإشعارات مفعلة" : "السماح بالإشعارات للتحكم في الأناشيد من لوحة الإشعارات وشاشة القفل"}
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-            </svg>
-          </button>
-
-          <button
             onClick={() => setIsHeadphonesModalOpen(true)}
             className={`p-2 rounded-xl transition-all flex items-center justify-center relative ${
               isHeadsetConnected
@@ -2151,6 +2276,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             isLoggingIn={isLoggingIn}
             loginError={loginError}
             onShareApp={handleShare}
+            storagePersisted={storagePersisted}
+            onRestoreSafetyVault={handleRestoreFromSafetyVault}
           />
         </div>
       </header>
@@ -2352,10 +2479,16 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             else handleSelectTrack(currentTracks.length - 1);
           }
         }}
+        onSeekForward={(sec) => handleSkip(sec)}
+        onSeekBackward={(sec) => handleSkip(-sec)}
+        onRestart={() => handleSeek(0)}
+        onShuffle={handleShuffle}
         soundProfile={soundProfile}
         onSoundProfileChange={applySoundProfile}
-        storagePersisted={storagePersisted}
-        onRestoreVault={handleRestoreFromSafetyVault}
+        customEq={customEq}
+        onCustomEqChange={handleCustomEqChange}
+        gestureSettings={gestureSettings}
+        onGestureSettingsChange={handleGestureSettingsChange}
       />
 
       {cropperData && (
