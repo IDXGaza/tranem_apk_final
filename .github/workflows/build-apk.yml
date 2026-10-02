@@ -63,20 +63,15 @@ jobs:
             cp /tmp/android_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
           fi
 
-      - name: Configure Gradle for Kotlin & MediaSession
+      - name: Configure Android Gradle Dependencies
         run: |
-          # Add Kotlin plugin to root build.gradle if missing
-          if ! grep -q "kotlin-gradle-plugin" android/build.gradle; then
-            sed -i '/dependencies {/a \        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22"' android/build.gradle
-          fi
-
-          # Apply Kotlin and add media dependency in app/build.gradle
-          if ! grep -q "kotlin-android" android/app/build.gradle; then
-            sed -i '/apply plugin: .com.android.application./a apply plugin: "kotlin-android"' android/app/build.gradle
-          fi
-
+          # Add androidx.media and multiDex support in app/build.gradle
           if ! grep -q "androidx.media:media" android/app/build.gradle; then
-            sed -i '/dependencies {/a \    implementation "androidx.media:media:1.7.0"\n    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"' android/app/build.gradle
+            sed -i '/dependencies {/a \    implementation "androidx.media:media:1.7.0"' android/app/build.gradle
+          fi
+
+          if ! grep -q "multiDexEnabled" android/app/build.gradle; then
+            sed -i '/defaultConfig {/a \        multiDexEnabled true' android/app/build.gradle
           fi
 
       - name: Prepare google-services.json

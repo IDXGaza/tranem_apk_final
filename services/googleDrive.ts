@@ -160,26 +160,12 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
       try {
         user = await GoogleAuth.signIn() as any;
       } catch (nativeSignErr: any) {
-        console.warn('Native GoogleAuth.signIn failed, attempting GIS / Web fallback:', nativeSignErr);
-        // Fallback to Google Identity Services / Web popup
-        try {
-          const webToken = await requestGoogleTokenViaGIS();
-          if (webToken) return webToken;
-        } catch (webFallbackErr) {
-          console.warn('Web fallback also failed:', webFallbackErr);
-        }
+        console.warn('Native GoogleAuth.signIn failed:', nativeSignErr);
         throw nativeSignErr;
       }
 
       const accessToken = user?.authentication?.accessToken || user?.accessToken || user?.authentication?.idToken || user?.idToken;
       if (!accessToken) {
-        // Try fallback if token is missing from native response
-        try {
-          const webToken = await requestGoogleTokenViaGIS();
-          if (webToken) return webToken;
-        } catch (e) {
-          console.warn('Fallback after empty token failed:', e);
-        }
         throw new Error('لم يتم استلام رمز مصادقة Google من النظام.');
       }
       
@@ -244,20 +230,7 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
       throw new Error('ExpiredToken');
     }
 
-    // Try Google Identity Services first
-    try {
-      const gisToken = await requestGoogleTokenViaGIS();
-      if (gisToken) {
-        return gisToken;
-      }
-    } catch (gisErr: any) {
-      console.warn('GIS attempt error, trying Firebase popup fallback:', gisErr);
-      if (gisErr?.message?.includes('تم إغلاق نافذة')) {
-        throw gisErr;
-      }
-    }
-
-    // Secondary fallback: Firebase Auth Popup
+    // Web platform: Use Firebase Auth Popup directly (uses authorized firebaseapp.com handler to prevent origin_mismatch errors)
     try {
       const { auth } = await import('../firebase');
       const { signInWithPopup, GoogleAuthProvider } = await import('firebase/auth');
@@ -278,6 +251,16 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
 
       localStorage.setItem('google_access_token', accessToken);
       localStorage.setItem('google_token_acquired_at', Date.now().toString());
+
+      if (result.user) {
+        const traneemUser = {
+          displayName: result.user.displayName || 'مستخدم ترانيم',
+          email: result.user.email || '',
+          photoURL: result.user.photoURL || '',
+          uid: result.user.uid || ('user_' + Date.now())
+        };
+        localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
+      }
 
       return accessToken;
     } catch (err: any) {
