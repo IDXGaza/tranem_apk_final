@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,16 +31,53 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | sdkmanager --licenses || true
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
+
+      - name: Backup Custom Native Android Source
+        run: |
+          mkdir -p /tmp/android_backup
+          if [ -d "android/app/src/main/java/com/idxgaza/traneem" ]; then
+            cp -r android/app/src/main/java/com/idxgaza/traneem /tmp/android_backup/
+          fi
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+            cp android/app/src/main/AndroidManifest.xml /tmp/android_backup/
+          fi
 
       - name: Add Android platform
         run: |
           rm -rf android
           npx cap add android
+
+      - name: Restore and Integrate Custom Native Code
+        run: |
+          mkdir -p android/app/src/main/java/com/idxgaza/traneem
+          if [ -d "/tmp/android_backup/traneem" ]; then
+            cp -r /tmp/android_backup/traneem/* android/app/src/main/java/com/idxgaza/traneem/
+          fi
+          if [ -f "/tmp/android_backup/AndroidManifest.xml" ]; then
+            cp /tmp/android_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Configure Gradle for Kotlin & MediaSession
+        run: |
+          # Add Kotlin plugin to root build.gradle if missing
+          if ! grep -q "kotlin-gradle-plugin" android/build.gradle; then
+            sed -i '/dependencies {/a \        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22"' android/build.gradle
+          fi
+
+          # Apply Kotlin and add media dependency in app/build.gradle
+          if ! grep -q "kotlin-android" android/app/build.gradle; then
+            sed -i '/apply plugin: .com.android.application./a apply plugin: "kotlin-android"' android/app/build.gradle
+          fi
+
+          if ! grep -q "androidx.media:media" android/app/build.gradle; then
+            sed -i '/dependencies {/a \    implementation "androidx.media:media:1.7.0"\n    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.22"' android/app/build.gradle
+          fi
 
       - name: Prepare google-services.json
         run: |
@@ -136,30 +174,6 @@ jobs:
           base64 -w 0 debug.keystore > keystore_base64.txt || base64 debug.keystore > keystore_base64.txt
           echo "Keystore base64 saved to keystore_base64.txt and uploaded to Artifacts."
 
-      - name: Configure MainActivity and GoogleAuth
-        run: |
-          rm -f android/app/src/main/java/com/idxgaza/traneem/MainActivity.kt
-          cat > android/app/src/main/java/com/idxgaza/traneem/MainActivity.java << 'EOF'
-          package com.idxgaza.traneem;
-
-          import android.os.Bundle;
-          import com.codetrixstudio.capacitor.GoogleAuth.GoogleAuth;
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-              @Override
-              public void onCreate(Bundle savedInstanceState) {
-                  registerPlugin(GoogleAuth.class);
-                  super.onCreate(savedInstanceState);
-              }
-          }
-          EOF
-
-
-      - name: Add permissions to AndroidManifest
-        run: |
-          sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />|' android/app/src/main/AndroidManifest.xml
-
       - name: Sync Capacitor
         run: npx cap sync android
 
@@ -185,11 +199,6 @@ jobs:
           EOF
           fi
           cat android/app/src/main/res/values/strings.xml
-
-      - name: Verify GoogleAuth plugin and Configure Signing
-        run: |
-          cat android/app/src/main/java/com/idxgaza/traneem/MainActivity.java
-          cp debug.keystore android/app/debug.keystore
 
       - name: Build APK
         run: |
