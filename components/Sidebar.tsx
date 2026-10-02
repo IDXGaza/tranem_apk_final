@@ -13,7 +13,8 @@ import {
   X, 
   Shuffle, 
   AlertCircle,
-  GripVertical
+  GripVertical,
+  ShieldCheck
 } from 'lucide-react';
 import { Track } from '../types';
 import { normalizeArabic } from '../utils/arabicNormalization';
@@ -40,6 +41,7 @@ interface SidebarProps {
   onOpenBackup?: () => void;
   onEditTrack?: (track: Track) => void;
   isLoading?: boolean;
+  onRestoreSafetyVault?: () => void;
 }
 
 const DropPlaceholder = () => (
@@ -53,7 +55,7 @@ const DropPlaceholder = () => (
 
 const Sidebar: React.FC<SidebarProps> = ({ 
   onImport, onRemove, onMove, onReorderEnd, onToggleSourceType, defaultView, setDefaultView, tracks, currentId, onSelect, onPlayRandom, isOpen = false, onClose,
-  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className
+  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className, onRestoreSafetyVault
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState<'all' | 'record' | 'import'>(defaultView);
@@ -61,6 +63,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null); 
   const lastTargetIndex = useRef<number | null>(null);
   const [openMenuTrackId, setOpenMenuTrackId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Touch reordering refs & states
   const touchStartY = useRef<number>(0);
@@ -384,6 +387,19 @@ const Sidebar: React.FC<SidebarProps> = ({
                </button>
              ))}
           </div>
+
+          {onRestoreSafetyVault && (
+            <button
+              onClick={() => {
+                onRestoreSafetyVault();
+                if (onClose) onClose();
+              }}
+              className="w-full py-2 px-3 bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-bold rounded-xl border border-emerald-500/20 text-[11px] flex items-center justify-center gap-1.5 transition-all active:scale-95"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>استرجاع الأناشيد من مستودع الأمان</span>
+            </button>
+          )}
         </div>
 
         <nav ref={navRef} className="flex-1 min-h-0 overflow-y-auto px-5 pb-36 space-y-4 pt-4 custom-scrollbar overscroll-contain">
@@ -563,15 +579,42 @@ const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   </div>
                   
-                  <button 
-                    onClick={(e) => { 
-                      e.stopPropagation();
-                      if (window.confirm('هل أنت متأكد من حذف هذه الأنشودة؟')) onRemove(item.track.id);
-                    }} 
-                    className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-full transition-all active:scale-90"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  {confirmDeleteId === item.track.id ? (
+                    <div className="flex items-center gap-1 bg-red-500/10 p-1 rounded-xl border border-red-500/20 shrink-0">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemove(item.track.id);
+                          setConfirmDeleteId(null);
+                        }}
+                        className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white font-bold text-[10px] rounded-lg shadow-sm"
+                        title="تأكيد الحذف"
+                      >
+                        حذف
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDeleteId(null);
+                        }}
+                        className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg text-xs"
+                        title="إلغاء"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button 
+                      onClick={(e) => { 
+                        e.stopPropagation();
+                        setConfirmDeleteId(item.track.id);
+                      }} 
+                      className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-full transition-all active:scale-90"
+                      title="حذف النشيد"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
                 {dropTargetIndex === item.originalIndex && draggedItemIndex !== null && draggedItemIndex < item.originalIndex && (
                   <DropPlaceholder />

@@ -1,9 +1,19 @@
 
 import { Capacitor, registerPlugin } from '@capacitor/core';
 const MediaSession = registerPlugin<{
-  updateMetadata: (opts: { title: string; artist: string; artworkUrl: string; isPlaying: boolean }) => Promise<void>;
-  updatePlaybackState: (opts: { isPlaying: boolean }) => Promise<void>;
+  updateMetadata: (opts: { 
+    title: string; 
+    artist: string; 
+    artworkUrl: string; 
+    isPlaying: boolean; 
+    duration?: number; 
+    position?: number; 
+  }) => Promise<void>;
+  updatePlaybackState: (opts: { isPlaying: boolean; position?: number }) => Promise<void>;
   hideNotification: () => Promise<void>;
+  requestNotificationPermission: () => Promise<{ granted: boolean; requested?: boolean }>;
+  checkNotificationPermission: () => Promise<{ granted: boolean }>;
+  isHeadsetConnected: () => Promise<{ connected: boolean; deviceName?: string }>;
 }>('MediaSession');
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as fflate from 'fflate';
@@ -20,7 +30,9 @@ import { useAudioRecorder } from './hooks/useAudioRecorder';
 import GoogleDriveBackupModal from './components/GoogleDriveBackupModal';
 import ImageCropperModal from './components/ImageCropperModal';
 import { ShareTrackModal } from './components/ShareTrackModal';
+import { HeadphoneControlsModal, SoundProfile } from './components/HeadphoneControlsModal';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Headphones } from 'lucide-react';
 
 // Cloud Sync integrations
 import { runCloudSync, SyncProgress } from './services/cloudSync';
@@ -28,223 +40,22 @@ import { getAccessToken } from './services/googleDrive';
 import { LoginScreen } from './components/LoginScreen';
 import { UserBadge } from './components/UserBadge';
 
-// Removed cloud functions syncTrackToCloud and syncDeleteTrackToCloud
+// Unified robust database service (anti-data-loss & safety vault)
+import {
+  initDB,
+  saveTrackToDB,
+  deleteTrackFromDB,
+  getAllTracksFromDB,
+  getTrackFromDB,
+  updateTracksMetaCache,
+  restoreFromSafetyVault,
+  ensureStoragePersistence,
+  setOnDBChangedCallback
+} from './services/db';
 
 const UNIFORM_PLACEHOLDER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&h=600&auto=format&fit=crop";
 
-const DB_NAME = 'TraneemDB';
-const STORE_NAME = 'tracks';
-
-let dbInstance: IDBDatabase | null = null;
 const deletedTrackIds = new Set<string>();
-try {
-  const permanentlyDeletedStr = localStorage.getItem('permanently_deleted_track_ids') || '[]';
-  const list = JSON.parse(permanentlyDeletedStr);
-  if (Array.isArray(list)) {
-    list.forEach(id => deletedTrackIds.add(id));
-  }
-} catch (e) {
-  console.error("Failed to parse permanently_deleted_track_ids on load:", e);
-}
-let onDBChangedCallback: (() => void) | null = null;
-
-const initDB = (): Promise<IDBDatabase> => {
-  if (dbInstance) return Promise.resolve(dbInstance);
-
-  return new Promise((resolve, reject) => {
-    try {
-      if (!window.indexedDB) {
-        return reject(new Error("IndexedDB is not supported in this browser."));
-      }
-      
-      const timeoutId = setTimeout(() => {
-        reject(new Error("IndexedDB initialization timed out."));
-      }, 5000);
-
-      const request = window.indexedDB.open(DB_NAME, 1);
-      
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-        }
-      };
-      
-      request.onsuccess = () => {
-        clearTimeout(timeoutId);
-        dbInstance = request.result;
-        
-        dbInstance.onversionchange = () => {
-          dbInstance?.close();
-          dbInstance = null;
-        };
-        
-        resolve(dbInstance);
-      };
-      
-      request.onerror = () => {
-        clearTimeout(timeoutId);
-        reject(request.error || new Error("Unknown IndexedDB error"));
-      };
-      
-      request.onblocked = () => {
-        clearTimeout(timeoutId);
-        reject(new Error("IndexedDB is blocked. Please close other tabs of this app."));
-      };
-    } catch (error) {
-      reject(error);
-    }
-  });
-};
-
-const serializeTrackForDB = async (track: any): Promise<any> => {
-  const serialized = { ...track };
-  
-  // Directly store Blobs in IndexedDB (native & 10x faster)
-  // Strip temporary blob URLs to avoid wasting DB space and reference dead object URLs
-  delete serialized.url;
-  delete serialized.coverUrl;
-
-  return serialized;
-};
-
-const deserializeTrackFromDB = (serialized: any): any => {
-  if (!serialized) return serialized;
-  const track = { ...serialized };
-  
-  // Backward compatibility with legacy ArrayBuffer records
-  if (serialized.fileBuffer && !track.fileBlob) {
-    track.fileBlob = new Blob([serialized.fileBuffer], { type: serialized.fileBlobType || 'audio/mpeg' });
-    delete track.fileBuffer;
-  }
-  
-  if (serialized.coverBuffer && !track.coverBlob) {
-    track.coverBlob = new Blob([serialized.coverBuffer], { type: serialized.coverBlobType || 'image/jpeg' });
-    delete track.coverBuffer;
-  }
-  
-  return track;
-};
-
-const saveTrackToDB = async (track: any): Promise<void> => {
-  let isDeleted = deletedTrackIds.has(track.id);
-  if (!isDeleted) {
-    try {
-      const permanentlyDeletedStr = localStorage.getItem('permanently_deleted_track_ids') || '[]';
-      const list = JSON.parse(permanentlyDeletedStr);
-      if (Array.isArray(list) && list.includes(track.id)) {
-        isDeleted = true;
-        deletedTrackIds.add(track.id); // Cache it in memory too
-      }
-    } catch (e) {}
-  }
-
-  if (isDeleted) {
-    console.log("saveTrackToDB: Prevented saving a deleted track", track.id);
-    return;
-  }
-  try {
-    const db = await initDB();
-    const serialized = await serializeTrackForDB(track);
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE_NAME).put(serialized);
-    });
-    
-    // Trigger auto-sync callback for real-time changes
-    onDBChangedCallback?.();
-  } catch (error) {
-    console.error("IndexedDB save error:", error);
-    throw error;
-  }
-};
-
-const deleteTrackFromDB = async (id: string): Promise<void> => {
-  deletedTrackIds.add(id);
-  try {
-    const permanentlyDeletedStr = localStorage.getItem('permanently_deleted_track_ids') || '[]';
-    const permanentlyDeleted = JSON.parse(permanentlyDeletedStr);
-    if (!permanentlyDeleted.includes(id)) {
-      permanentlyDeleted.push(id);
-      localStorage.setItem('permanently_deleted_track_ids', JSON.stringify(permanentlyDeleted));
-    }
-  } catch (e) {
-    console.error("Failed to save permanently deleted track id:", e);
-  }
-
-  try {
-    const db = await initDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE_NAME).delete(id);
-    });
-    
-    // Trigger auto-sync callback for real-time changes
-    onDBChangedCallback?.();
-  } catch (error) {
-    console.error("IndexedDB delete error:", error);
-    throw error;
-  }
-};
-
-const getAllTracksFromDB = async (): Promise<any[]> => {
-  try {
-    const db = await initDB();
-    const serializedTracks = await new Promise<any[]>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const request = tx.objectStore(STORE_NAME).getAll();
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(tx.error);
-    });
-    return serializedTracks.map(t => deserializeTrackFromDB(t));
-  } catch (error) {
-    console.error("IndexedDB get all error:", error);
-    return [];
-  }
-};
-
-const getTrackFromDB = async (id: string): Promise<any> => {
-  try {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const request = tx.objectStore(STORE_NAME).get(id);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(tx.error);
-    });
-  } catch (error) {
-    console.error("IndexedDB get error:", error);
-    return null;
-  }
-};
-
-const updateTracksMetaCache = (trackList: Track[]) => {
-  try {
-    if (!Array.isArray(trackList) || trackList.length === 0) return;
-
-    const metaList = trackList.map(t => ({
-      id: t.id,
-      name: t.name,
-      artist: t.artist,
-      duration: t.duration,
-      order: t.order,
-      isFavorite: t.isFavorite,
-      timestamps: t.timestamps,
-      sourceType: t.sourceType,
-      playCount: t.playCount,
-      listenTime: t.listenTime,
-      url: (t.url && !t.url.startsWith('blob:')) ? t.url : (t.audioUrl || ''),
-      coverUrl: (t.coverUrl && !t.coverUrl.startsWith('blob:')) ? t.coverUrl : UNIFORM_PLACEHOLDER
-    }));
-    localStorage.setItem('traneem_meta_cache', JSON.stringify(metaList));
-  } catch (e) {
-    console.warn("Failed to update tracks meta cache:", e);
-  }
-};
 
 const App: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>(() => {
@@ -290,16 +101,26 @@ const App: React.FC = () => {
     return null;
   });
 
+  const [soundProfile, setSoundProfile] = useState<SoundProfile>(() => {
+    return (localStorage.getItem('traneem_sound_profile') as SoundProfile) || 'balanced';
+  });
+  const [storagePersisted, setStoragePersisted] = useState(false);
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
+
+  const bassFilterRef = useRef<BiquadFilterNode | null>(null);
+  const midFilterRef = useRef<BiquadFilterNode | null>(null);
+  const trebleFilterRef = useRef<BiquadFilterNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+
   // Request storage persistence and track application usage & opens
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      if (navigator.storage && navigator.storage.persist) {
-        navigator.storage.persist().then((persisted) => {
-          console.log("📦 Storage persistence status:", persisted);
-        }).catch((err) => {
-          console.error("❌ Storage persistence request failed:", err);
-        });
-      }
+      ensureStoragePersistence().then((persisted) => {
+        setStoragePersisted(persisted);
+        console.log("📦 Storage persistence status:", persisted);
+      }).catch((err) => {
+        console.error("❌ Storage persistence request failed:", err);
+      });
 
       // Track application open count
       try {
@@ -356,6 +177,9 @@ const App: React.FC = () => {
   const [shuffleHistory, setShuffleHistory] = useState<number[]>([]);
   const [cropperData, setCropperData] = useState<{ image: string; file: File } | null>(null);
   const [sharingTrack, setSharingTrack] = useState<Track | null>(null);
+  const [isHeadphonesModalOpen, setIsHeadphonesModalOpen] = useState(false);
+  const [isHeadsetConnected, setIsHeadsetConnected] = useState(false);
+  const [headsetDeviceName, setHeadsetDeviceName] = useState('مكبر الصوت الافتراضي');
   const lastStatsUpdateRef = useRef<number>(0);
 
   // Metadata editing state
@@ -834,11 +658,11 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
   // Bind the global IndexedDB change callback to trigger our auto-sync
   useEffect(() => {
-    onDBChangedCallback = () => {
+    setOnDBChangedCallback(() => {
       triggerAutoSyncWithCloud();
-    };
+    });
     return () => {
-      onDBChangedCallback = null;
+      setOnDBChangedCallback(null);
     };
   }, [triggerAutoSyncWithCloud]);
 
@@ -1111,6 +935,42 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     startRecording();
   };
 
+  const applySoundProfile = useCallback((profile: SoundProfile) => {
+    setSoundProfile(profile);
+    localStorage.setItem('traneem_sound_profile', profile);
+
+    const bass = bassFilterRef.current;
+    const mid = midFilterRef.current;
+    const treble = trebleFilterRef.current;
+    const gain = gainNodeRef.current;
+    const ctx = audioCtxRef.current;
+
+    if (!bass || !mid || !treble || !gain || !ctx) return;
+    const now = ctx.currentTime;
+
+    if (profile === 'balanced') {
+      bass.gain.setValueAtTime(0, now);
+      mid.gain.setValueAtTime(0, now);
+      treble.gain.setValueAtTime(0, now);
+      gain.gain.setValueAtTime(1.0, now);
+    } else if (profile === 'vocal') {
+      bass.gain.setValueAtTime(-1.5, now);
+      mid.gain.setValueAtTime(5.0, now);
+      treble.gain.setValueAtTime(1.5, now);
+      gain.gain.setValueAtTime(1.0, now);
+    } else if (profile === 'bass') {
+      bass.gain.setValueAtTime(7.0, now);
+      mid.gain.setValueAtTime(0, now);
+      treble.gain.setValueAtTime(-1.0, now);
+      gain.gain.setValueAtTime(1.0, now);
+    } else if (profile === 'boost') {
+      bass.gain.setValueAtTime(1.5, now);
+      mid.gain.setValueAtTime(2.0, now);
+      treble.gain.setValueAtTime(1.5, now);
+      gain.gain.setValueAtTime(1.3, now);
+    }
+  }, []);
+
   const initAudioCtx = useCallback(() => {
     if (audioCtxRef.current || !audioRef.current) {
       if (audioCtxRef.current?.state === 'suspended') {
@@ -1126,35 +986,95 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       const source = ctx.createMediaElementSource(audioRef.current);
       sourceRef.current = source;
 
-      source.connect(ctx.destination);
+      // Equalizer nodes for headphone and audio profiles
+      const bass = ctx.createBiquadFilter();
+      bass.type = 'lowshelf';
+      bass.frequency.value = 120;
+      bassFilterRef.current = bass;
+
+      const mid = ctx.createBiquadFilter();
+      mid.type = 'peaking';
+      mid.frequency.value = 2500;
+      mid.Q.value = 1.0;
+      midFilterRef.current = mid;
+
+      const treble = ctx.createBiquadFilter();
+      treble.type = 'highshelf';
+      treble.frequency.value = 7000;
+      trebleFilterRef.current = treble;
+
+      const gain = ctx.createGain();
+      gain.gain.value = 1.0;
+      gainNodeRef.current = gain;
+
+      // Connect graph: source -> bass -> mid -> treble -> gain -> destination
+      source.connect(bass);
+      bass.connect(mid);
+      mid.connect(treble);
+      treble.connect(gain);
+      gain.connect(ctx.destination);
+
+      applySoundProfile(soundProfile);
     } catch (e) {
       console.error("AudioContext initialization failed:", e);
     }
-  }, []);
+  }, [applySoundProfile, soundProfile]);
 
   useEffect(() => {
     let isCancelled = false;
-    const loadLocalData = async () => {
+    const loadLocalData = async (retryCount = 0) => {
       try {
         const savedTracks = await getAllTracksFromDB();
         if (isCancelled) return;
-        const sortedTracks = savedTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
-        const tracksWithUrls = sortedTracks.map(t => ({
-          ...t,
-          url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
-          coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
-        }));
-        
-        setTracks(tracksWithUrls);
-        updateTracksMetaCache(tracksWithUrls);
-        setIsInitialLoading(false);
 
-        const restoredId = localStorage.getItem('lastPlayedTrackId');
-        const restoredIndex = tracksWithUrls.findIndex(t => t.id === restoredId);
-        if (restoredIndex !== -1) {
-          setCurrentTrackIndex(restoredIndex);
-        } else if (tracksWithUrls.length > 0) {
-          setCurrentTrackIndex(prev => prev !== null ? prev : 0);
+        if (savedTracks && savedTracks.length > 0) {
+          const sortedTracks = savedTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
+          const tracksWithUrls = sortedTracks.map(t => ({
+            ...t,
+            url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
+            coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
+          }));
+          
+          setTracks(tracksWithUrls);
+          updateTracksMetaCache(tracksWithUrls);
+          setIsInitialLoading(false);
+
+          const restoredId = localStorage.getItem('lastPlayedTrackId');
+          const restoredIndex = tracksWithUrls.findIndex(t => t.id === restoredId);
+          if (restoredIndex !== -1) {
+            setCurrentTrackIndex(restoredIndex);
+          } else if (tracksWithUrls.length > 0) {
+            setCurrentTrackIndex(prev => prev !== null ? prev : 0);
+          }
+        } else {
+          // If DB returned 0 tracks, retry before assuming DB is truly empty
+          if (retryCount < 4) {
+            console.warn(`IndexedDB returned 0 tracks, retrying attempt ${retryCount + 1}...`);
+            setTimeout(() => {
+              if (!isCancelled) loadLocalData(retryCount + 1);
+            }, 500 * (retryCount + 1));
+            return;
+          }
+
+          // If still empty after retries, attempt recovery from safety vault
+          try {
+            const vaultTracks = await restoreFromSafetyVault();
+            if (!isCancelled && vaultTracks && vaultTracks.length > 0) {
+              const sortedTracks = vaultTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
+              const tracksWithUrls = sortedTracks.map(t => ({
+                ...t,
+                url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
+                coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
+              }));
+              setTracks(tracksWithUrls);
+              updateTracksMetaCache(tracksWithUrls);
+              setVaultNotice('تمت استعادة الأناشيد تلقائياً من مستودع الأمان الاحتياطي ✅');
+              setIsInitialLoading(false);
+              return;
+            }
+          } catch (vaultErr) {}
+
+          setIsInitialLoading(false);
         }
       } catch (e) {
         console.error("Failed to load tracks from DB", e);
@@ -1165,7 +1085,212 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     return () => { isCancelled = true; };
   }, []);
 
+  const handleRestoreFromSafetyVault = useCallback(async () => {
+    const restored = await restoreFromSafetyVault();
+    const sorted = restored.sort((a, b) => (a.order || 0) - (b.order || 0));
+    const withUrls = sorted.map(t => ({
+      ...t,
+      url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
+      coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
+    }));
+    setTracks(withUrls);
+    updateTracksMetaCache(withUrls);
+    if (withUrls.length > 0) {
+      setCurrentTrackIndex(0);
+      setVaultNotice('تمت استعادة أناشيدك بنجاح من مستودع الأمان الاحتياطي! ✅');
+    }
+  }, []);
+
+  const [hasNotificationPermission, setHasNotificationPermission] = useState<boolean>(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      return Notification.permission === 'granted';
+    }
+    return false;
+  });
+
+  const checkNotificationPermissionStatus = useCallback(async () => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const res = await MediaSession.checkNotificationPermission();
+        setHasNotificationPermission(!!res?.granted);
+      } catch (e) {
+        console.warn("Check notification perm error:", e);
+      }
+    } else if (typeof window !== 'undefined' && 'Notification' in window) {
+      setHasNotificationPermission(Notification.permission === 'granted');
+    }
+  }, []);
+
+  const requestPlaybackNotificationPermission = useCallback(async (): Promise<boolean> => {
+    let granted = false;
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const res = await MediaSession.requestNotificationPermission();
+        granted = !!res?.granted;
+      } catch (e) {
+        console.warn('Native notification request error:', e);
+      }
+    }
+
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      try {
+        if (Notification.permission === 'granted') {
+          granted = true;
+        } else if (Notification.permission !== 'denied') {
+          const res = await Notification.requestPermission();
+          granted = (res === 'granted');
+        }
+      } catch (e) {
+        console.warn('Web notification request error:', e);
+      }
+    }
+
+    setHasNotificationPermission(granted);
+    return granted;
+  }, []);
+
+  const triggerNotificationPermissionIfNeeded = useCallback(async () => {
+    if (hasNotificationPermission) return;
+    if (localStorage.getItem('traneem_notification_requested') === 'true') return;
+    localStorage.setItem('traneem_notification_requested', 'true');
+    await requestPlaybackNotificationPermission();
+  }, [hasNotificationPermission, requestPlaybackNotificationPermission]);
+
+  useEffect(() => {
+    checkNotificationPermissionStatus();
+  }, [checkNotificationPermissionStatus]);
+
+  const updateMediaSession = useCallback(async (isPlaying: boolean, overrideDuration?: number, overridePosition?: number) => {
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    if (currentIdx === null) return;
+    const track = currentTracks[currentIdx];
+    if (!track) return;
+
+    const audio = audioRef.current;
+    const duration = typeof overrideDuration === 'number'
+      ? overrideDuration
+      : ((audio?.duration && isFinite(audio.duration) && !isNaN(audio.duration)) ? audio.duration : (track.duration || 0));
+    const position = typeof overridePosition === 'number'
+      ? overridePosition
+      : ((audio?.currentTime && isFinite(audio.currentTime) && !isNaN(audio.currentTime)) ? audio.currentTime : 0);
+
+    const coverSrc = (track.coverUrl && track.coverUrl.trim() !== '')
+      ? track.coverUrl
+      : UNIFORM_PLACEHOLDER;
+
+    // Web MediaSession
+    if ('mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.name,
+          artist: track.artist || 'ترانيم',
+          album: 'ترانيم - مكتبتي',
+          artwork: [
+            { src: coverSrc, sizes: '96x96', type: 'image/png' },
+            { src: coverSrc, sizes: '128x128', type: 'image/png' },
+            { src: coverSrc, sizes: '192x192', type: 'image/png' },
+            { src: coverSrc, sizes: '256x256', type: 'image/png' },
+            { src: coverSrc, sizes: '384x384', type: 'image/png' },
+            { src: coverSrc, sizes: '512x512', type: 'image/png' },
+          ]
+        });
+        navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+
+        if ('setPositionState' in navigator.mediaSession && duration > 0) {
+          navigator.mediaSession.setPositionState({
+            duration: Math.max(duration, 0.1),
+            playbackRate: audio?.playbackRate || 1.0,
+            position: Math.min(Math.max(position, 0), duration)
+          });
+        }
+      } catch (e) {
+        console.warn('Web MediaSession error:', e);
+      }
+    }
+
+    // Native Capacitor Android MediaSession
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const artworkUrl = (track.coverUrl && (track.coverUrl.startsWith('http://') || track.coverUrl.startsWith('https://') || track.coverUrl.startsWith('data:image')))
+          ? track.coverUrl
+          : UNIFORM_PLACEHOLDER;
+
+        await MediaSession.updateMetadata({
+          title: track.name,
+          artist: track.artist || 'ترانيم',
+          artworkUrl,
+          isPlaying,
+          duration,
+          position
+        });
+      } catch (e) {
+        console.warn('Native MediaSession error:', e);
+      }
+    }
+  }, []);
+
+  const handleSeek = useCallback((time: number) => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.currentTime = time;
+      setPlayerState(prev => ({ ...prev, currentTime: time }));
+      updateMediaSession(isPlayingRef.current, audio.duration, time);
+    }
+  }, [updateMediaSession]);
+
+  const handleTimestampSeek = useCallback((time: number) => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.currentTime = time;
+      setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
+      updateMediaSession(true, audio.duration, time);
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          setPlayerState(prev => ({ ...prev, isPlaying: false }));
+          if (error.name !== 'NotAllowedError') {
+            console.error(error);
+          }
+        });
+      }
+    }
+  }, [updateMediaSession]);
+
+  const handleSkip = useCallback((seconds: number) => {
+    const audio = audioRef.current;
+    if (audio) {
+      const newTime = Math.max(0, Math.min(audio.currentTime + seconds, audio.duration || 0));
+      audio.currentTime = newTime;
+      setPlayerState(prev => ({ ...prev, currentTime: newTime }));
+      updateMediaSession(isPlayingRef.current, audio.duration, newTime);
+    }
+  }, [updateMediaSession]);
+
+  const handlePause = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      setPlayerState(prev => ({ ...prev, isPlaying: false }));
+      updateMediaSession(false);
+    }
+  }, [updateMediaSession]);
+
+  const handlePlay = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      initAudioCtx();
+      setPlayerState(prev => ({ ...prev, isPlaying: true }));
+      updateMediaSession(true);
+      audio.play().catch(err => {
+        console.error("Playback failed:", err);
+        setPlayerState(prev => ({ ...prev, isPlaying: false }));
+      });
+    }
+  }, [initAudioCtx, updateMediaSession]);
+
   const handleSelectTrack = useCallback(async (index: number) => {
+    triggerNotificationPermissionIfNeeded();
     const track = tracks[index];
     if (!track) return;
     
@@ -1213,7 +1338,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         console.warn("Manual audio sync failed", e);
       }
     }
-  }, [tracks, initAudioCtx]);
+  }, [tracks, initAudioCtx, updateMediaSession, triggerNotificationPermissionIfNeeded]);
 
   const handleShuffle = useCallback(() => {
     if (tracks.length < 2) return;
@@ -1264,6 +1389,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [tracks, handleSelectTrack]);
 
   const handlePlayPause = async () => {
+    triggerNotificationPermissionIfNeeded();
     const audio = audioRef.current;
     if (!audio) return;
     initAudioCtx();
@@ -1308,91 +1434,13 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
   };
 
-  const handleSeek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time }));
-    }
-  }, []);
-
-  const handleTimestampSeek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(error => {
-          setPlayerState(prev => ({ ...prev, isPlaying: false }));
-          if (error.name !== 'NotAllowedError') {
-            console.error(error);
-          }
-        });
-      }
-    }
-  }, []);
-
-  const handleSkip = useCallback((seconds: number) => {
-    const audio = audioRef.current;
-    if (audio) {
-      const newTime = Math.max(0, Math.min(audio.currentTime + seconds, audio.duration || 0));
-      audio.currentTime = newTime;
-      setPlayerState(prev => ({ ...prev, currentTime: newTime }));
-    }
-  }, []);
-
-  const handlePause = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.pause();
-      setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      updateMediaSession(false);
-    }
-  }, []);
-
-  const handlePlay = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      initAudioCtx();
-      setPlayerState(prev => ({ ...prev, isPlaying: true }));
-      updateMediaSession(true);
-      audio.play().catch(err => {
-        console.error("Playback failed:", err);
-        setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      });
-    }
-  }, [initAudioCtx]);
-
-  const updateMediaSession = useCallback(async (isPlaying: boolean) => {
-    if (!Capacitor.isNativePlatform()) return;
-    const currentIdx = currentTrackIndexRef.current;
-    const currentTracks = tracksRef.current;
-    if (currentIdx === null) return;
-    const track = currentTracks[currentIdx];
-    if (!track) return;
-    try {
-      const artworkUrl = (track.coverUrl && !track.coverUrl.startsWith('blob:'))
-        ? track.coverUrl
-        : '';
-      await MediaSession.updateMetadata({
-        title: track.name,
-        artist: track.artist || 'ترانيم',
-        artworkUrl,
-        isPlaying,
-      });
-    } catch (e) {
-      console.warn('MediaSession error:', e);
-    }
-  }, []);
-
   // Media Session logic
   useEffect(() => {
     if (!('mediaSession' in navigator) || !currentTrack) return;
 
     const setupMediaSession = () => {
       try {
-        const coverSrc = (currentTrack.coverUrl && !currentTrack.coverUrl.startsWith('blob:')) 
+        const coverSrc = (currentTrack.coverUrl && currentTrack.coverUrl.trim() !== '') 
           ? currentTrack.coverUrl 
           : UNIFORM_PLACEHOLDER;
 
@@ -1443,19 +1491,21 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [currentTrack?.id, currentTrack?.name, currentTrack?.coverUrl, playerState.isPlaying, handlePlay, handlePause, handleSelectTrack, handleSkipToNext, handleSeek, handleSkip, currentTrackIndex, tracks.length]);
 
   useEffect(() => {
-    if (!currentTrack) {
+    if (currentTrack) {
+      updateMediaSession(isPlayingRef.current);
+    } else {
       if (Capacitor.isNativePlatform()) MediaSession.hideNotification().catch(() => {});
     }
-  }, [currentTrack]);
+  }, [currentTrack?.id, currentTrack?.name, currentTrack?.coverUrl, updateMediaSession]);
 
   useEffect(() => {
     if (Capacitor.isNativePlatform()) {
       let active = true;
       let listener: any = null;
       try {
-        listener = (MediaSession as any).addListener('mediaAction', (data: { action: string }) => {
+        listener = (MediaSession as any).addListener('mediaAction', (data: { action: string; position?: number }) => {
           if (!active) return;
-          console.log('Got MediaSession Action:', data.action);
+          console.log('Got MediaSession Action:', data.action, data.position);
           
           if (data.action === 'play') {
             handlePlay();
@@ -1483,19 +1533,131 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             }
           } else if (data.action === 'stop') {
             handlePause();
+          } else if (data.action === 'seek' && typeof data.position === 'number') {
+            handleSeek(data.position);
           }
         });
       } catch (err) {
         console.error('Error adding MediaSession listener:', err);
       }
+
+      let noisyListener: any = null;
+      try {
+        noisyListener = (MediaSession as any).addListener('headsetDisconnected', () => {
+          const autoPause = localStorage.getItem('traneem_auto_pause_unplug') !== 'false';
+          if (autoPause) {
+            handlePause();
+          }
+        });
+      } catch (err) {
+        console.error('Error adding noisy listener:', err);
+      }
+
       return () => {
         active = false;
         if (listener && typeof listener.remove === 'function') {
           listener.remove();
         }
+        if (noisyListener && typeof noisyListener.remove === 'function') {
+          noisyListener.remove();
+        }
       };
     }
-  }, [handlePlay, handlePause, handleSkipToNext, handleSelectTrack]);
+  }, [handlePlay, handlePause, handleSkipToNext, handleSelectTrack, handleSeek]);
+
+  // Periodic headphone connection state polling and devicechange listener
+  useEffect(() => {
+    let active = true;
+    let previousHadHeadset = false;
+
+    const checkHeadset = async () => {
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const res = await MediaSession.isHeadsetConnected();
+          if (active && res) {
+            setIsHeadsetConnected(!!res.connected);
+            if (res.deviceName) setHeadsetDeviceName(res.deviceName);
+          }
+        } catch (e) {}
+      } else if (typeof navigator !== 'undefined' && navigator.mediaDevices?.enumerateDevices) {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
+          const hasHeadset = audioOutputs.some(d => 
+            d.label.toLowerCase().includes('head') || 
+            d.label.toLowerCase().includes('ear') || 
+            d.label.toLowerCase().includes('bluetooth') || 
+            d.label.toLowerCase().includes('airpod') ||
+            d.label.toLowerCase().includes('buds') ||
+            d.deviceId !== 'default'
+          );
+          if (active) {
+            setIsHeadsetConnected(hasHeadset);
+            const named = audioOutputs.find(d => d.label && d.deviceId !== 'default');
+            if (named?.label) setHeadsetDeviceName(named.label);
+          }
+          if (previousHadHeadset && !hasHeadset && isPlayingRef.current) {
+            const autoPause = localStorage.getItem('traneem_auto_pause_unplug') !== 'false';
+            if (autoPause) {
+              handlePause();
+            }
+          }
+          previousHadHeadset = hasHeadset;
+        } catch (e) {}
+      }
+    };
+
+    checkHeadset();
+    const interval = setInterval(checkHeadset, 3500);
+
+    const onDeviceChange = () => {
+      checkHeadset();
+    };
+
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
+    }
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.removeEventListener) {
+        navigator.mediaDevices.removeEventListener('devicechange', onDeviceChange);
+      }
+    };
+  }, [handlePause]);
+
+  // Web keyboard & Bluetooth headphone key controls
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea' || (document.activeElement as any)?.isContentEditable) {
+        return;
+      }
+
+      if (e.code === 'MediaPlayPause' || (e.code === 'Space' && !e.repeat)) {
+        e.preventDefault();
+        handlePlayPause();
+      } else if (e.code === 'MediaTrackNext') {
+        e.preventDefault();
+        handleSkipToNext();
+      } else if (e.code === 'MediaTrackPrevious') {
+        e.preventDefault();
+        const currentIdx = currentTrackIndexRef.current;
+        const currentTracks = tracksRef.current;
+        if (currentIdx !== null && currentTracks.length > 0) {
+          if (currentIdx > 0) handleSelectTrack(currentIdx - 1);
+          else handleSelectTrack(currentTracks.length - 1);
+        }
+      } else if (e.code === 'MediaStop') {
+        e.preventDefault();
+        handlePause();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handlePlayPause, handleSkipToNext, handleSelectTrack, handlePause]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -1537,6 +1699,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     
     const onPlaying = () => {
       setPlayerState(prev => ({ ...prev, isLoading: false, isPlaying: true }));
+      updateMediaSession(true);
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
@@ -1545,6 +1708,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     
     const onPause = () => {
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
+      updateMediaSession(false);
       if ('mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
       }
@@ -1736,6 +1900,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     setTracks(prev => {
       const updated = [...prev, newTrack];
       setCurrentTrackIndex(updated.length - 1);
+      updateTracksMetaCache(updated);
       return updated;
     });
     setPlayerState(ps => ({...ps, isPlaying: true}));
@@ -1765,6 +1930,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     // Optimistic UI and Index Update
     setTracks(prev => {
       const newTracks = prev.filter(t => t.id !== id);
+      updateTracksMetaCache(newTracks);
       
       if (newTracks.length === 0) {
         setCurrentTrackIndex(null);
@@ -1803,6 +1969,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const updatedTracks = newTracks.map((t, idx) => ({ ...t, order: idx }));
 
     setTracks(updatedTracks);
+    updateTracksMetaCache(updatedTracks);
 
     // Save the correct updated order to IndexedDB immediately using the updatedTracks array
     try {
@@ -1876,6 +2043,35 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         <h1 className="text-xl md:text-2xl font-black text-[#4da8ab] absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">ترانيم</h1>
 
         <div className="flex items-center gap-1 md:gap-3">
+          <button
+            onClick={() => requestPlaybackNotificationPermission()}
+            className={`p-2 rounded-xl transition-all flex items-center justify-center ${
+              hasNotificationPermission 
+                ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20' 
+                : 'text-amber-500 bg-amber-500/10 hover:bg-amber-500/20 ring-1 ring-amber-500/30'
+            }`}
+            title={hasNotificationPermission ? "إشعارات التحكم في شريط الإشعارات مفعلة" : "السماح بالإشعارات للتحكم في الأناشيد من لوحة الإشعارات وشاشة القفل"}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+            </svg>
+          </button>
+
+          <button
+            onClick={() => setIsHeadphonesModalOpen(true)}
+            className={`p-2 rounded-xl transition-all flex items-center justify-center relative ${
+              isHeadsetConnected
+                ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20 ring-1 ring-[#4da8ab]/30'
+                : 'text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+            title="التحكم بالسماعات ومخارج الصوت"
+          >
+            <Headphones className="w-5 h-5" />
+            {isHeadsetConnected && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900 animate-pulse" />
+            )}
+          </button>
+
           <UserBadge
             user={user}
             onLogout={handleLogout}
@@ -1916,6 +2112,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               }}
               onEditTrack={handleOpenEditModal}
               isLoading={isInitialLoading}
+              onRestoreSafetyVault={handleRestoreFromSafetyVault}
               className="fixed inset-y-0 right-0 h-full w-[85%] sm:w-[400px] shadow-2xl z-[200] lg:!relative lg:!w-full lg:!shadow-none lg:!z-10 lg:!inset-auto"
             />
           </div>
@@ -1933,6 +2130,29 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               />
             ) : currentTrack ? (
               <div className="w-full flex flex-col items-center space-y-6 md:space-y-10 animate-in fade-in duration-500">
+                {vaultNotice && (
+                  <div className="w-full max-w-sm mx-auto px-4 py-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between gap-3 text-xs text-emerald-800 dark:text-emerald-200 animate-in fade-in">
+                    <span className="font-semibold">{vaultNotice}</span>
+                    <button onClick={() => setVaultNotice(null)} className="p-1 text-slate-400 hover:text-emerald-600">
+                      ✕
+                    </button>
+                  </div>
+                )}
+                {!hasNotificationPermission && (
+                  <div className="w-full max-w-sm mx-auto px-4 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-teal-500/10 border border-amber-500/20 flex items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
+                    <div className="flex items-center gap-2">
+                      <span className="text-amber-500 text-sm">🔔</span>
+                      <span className="font-semibold">إظهار النشيد في لوحة الإشعارات والقفل:</span>
+                    </div>
+                    <button
+                      onClick={() => requestPlaybackNotificationPermission()}
+                      className="px-3 py-1 bg-[#4da8ab] text-white font-bold rounded-xl text-xs active:scale-95 shadow-sm hover:bg-[#3d9194] transition-colors whitespace-nowrap"
+                    >
+                      طلب الإذن
+                    </button>
+                  </div>
+                )}
+
                 <div className="relative group w-full max-w-[200px] md:max-w-[280px] lg:max-w-sm shrink-0">
                   <div className="relative aspect-square w-full overflow-hidden rounded-[40px] md:rounded-[50px] lg:rounded-[60px] shadow-2xl border-[4px] md:border-[6px] border-white dark:border-slate-900 group-hover:scale-[1.01] transition-all duration-500">
                     <img src={currentTrack.coverUrl || undefined} className="w-full h-full object-cover" alt="" />
@@ -2026,7 +2246,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               track={currentTrack} state={playerState} onPlayPause={handlePlayPause} 
               onSeek={handleSeek} onSkip={handleSkip} onRateChange={handleRateChange} 
               onToggleFavorite={handleToggleFavorite} onToggleLoop={handleToggleLoop} 
-              onAddTimestamp={handleAddTimestamp} hasError={!!loadError} 
+              onAddTimestamp={handleAddTimestamp}
+              onOpenHeadphones={() => setIsHeadphonesModalOpen(true)}
+              isHeadsetConnected={isHeadsetConnected}
+              hasError={!!loadError} 
             />
           </div>
         )}
@@ -2047,6 +2270,29 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         setBackupStatusMessage={setBackupStatusMessage}
         onBackupSuccess={recordSuccessfulBackup}
         onCancelBackup={() => setBackupCancelSignal(true)}
+      />
+
+      <HeadphoneControlsModal
+        isOpen={isHeadphonesModalOpen}
+        onClose={() => setIsHeadphonesModalOpen(false)}
+        audioRef={audioRef}
+        isHeadsetConnected={isHeadsetConnected}
+        headsetDeviceName={headsetDeviceName}
+        isPlaying={playerState.isPlaying}
+        onPlayPause={handlePlayPause}
+        onNext={handleSkipToNext}
+        onPrevious={() => {
+          const currentIdx = currentTrackIndexRef.current;
+          const currentTracks = tracksRef.current;
+          if (currentIdx !== null && currentTracks.length > 0) {
+            if (currentIdx > 0) handleSelectTrack(currentIdx - 1);
+            else handleSelectTrack(currentTracks.length - 1);
+          }
+        }}
+        soundProfile={soundProfile}
+        onSoundProfileChange={applySoundProfile}
+        storagePersisted={storagePersisted}
+        onRestoreVault={handleRestoreFromSafetyVault}
       />
 
       {cropperData && (

@@ -7,7 +7,8 @@ import {
   RotateCw, 
   Play, 
   Pause, 
-  Flag 
+  Flag,
+  Headphones
 } from 'lucide-react';
 import { Track, PlayerState } from '../types';
 
@@ -21,6 +22,8 @@ interface PlayerProps {
   onToggleFavorite: () => void;
   onToggleLoop: () => void;
   onAddTimestamp: () => void;
+  onOpenHeadphones?: () => void;
+  isHeadsetConnected?: boolean;
   hasError?: boolean;
 }
 
@@ -32,7 +35,7 @@ const formatTime = (time: number) => {
 };
 
 const Player: React.FC<PlayerProps> = ({ 
-  track, state, onPlayPause, onSeek, onSkip, onToggleFavorite, onToggleLoop, onAddTimestamp, hasError 
+  track, state, onPlayPause, onSeek, onSkip, onToggleFavorite, onToggleLoop, onAddTimestamp, onOpenHeadphones, isHeadsetConnected, hasError 
 }) => {
   if (!track) return null;
 
@@ -102,7 +105,21 @@ const Player: React.FC<PlayerProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center justify-end flex-1">
+        <div className="flex items-center justify-end gap-1 md:gap-2 flex-1">
+          {onOpenHeadphones && (
+            <button 
+              onClick={onOpenHeadphones} 
+              className={`p-2.5 md:p-3 rounded-xl md:rounded-2xl active:scale-90 transition-all ${
+                isHeadsetConnected 
+                  ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20' 
+                  : 'text-slate-300 dark:text-slate-600 hover:text-[#4da8ab]'
+              }`} 
+              title="التحكم بالسماعات والأزرار"
+            >
+              <Headphones className="w-5 h-5 md:w-6 md:h-6" strokeWidth={2.2} />
+            </button>
+          )}
+
           <button onClick={onAddTimestamp} className="p-2.5 md:p-3 text-[#4da8ab] bg-[#4da8ab]/5 dark:bg-[#4da8ab]/10 hover:bg-[#4da8ab]/10 dark:hover:bg-[#4da8ab]/20 rounded-xl md:rounded-2xl active:scale-90 transition-all" disabled={hasError || state.isLoading}>
             <Flag className="w-5 h-5 md:w-6 md:h-6" strokeWidth={2.5} />
           </button>

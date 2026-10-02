@@ -8,70 +8,23 @@ import {
   deleteFileFromDrive,
   getBlobSHA256
 } from './googleDrive';
-
-const DB_NAME = 'TraneemDB';
-const STORE_NAME = 'tracks';
-
-// Simple self-contained IndexedDB helpers for cloudSync to avoid circular imports
-let syncDbInstance: IDBDatabase | null = null;
-const getSyncDB = (): Promise<IDBDatabase> => {
-  if (syncDbInstance) return Promise.resolve(syncDbInstance);
-  return new Promise((resolve, reject) => {
-    const request = window.indexedDB.open(DB_NAME, 1);
-    request.onsuccess = () => {
-      syncDbInstance = request.result;
-      syncDbInstance.onversionchange = () => {
-        syncDbInstance?.close();
-        syncDbInstance = null;
-      };
-      resolve(syncDbInstance);
-    };
-    request.onerror = () => reject(request.error);
-  });
-};
+import {
+  getAllTracksFromDB,
+  saveTrackToDB,
+  deleteTrackFromDB,
+  getPermanentlyDeletedIds
+} from './db';
 
 const getLocalTracks = async (): Promise<Track[]> => {
-  try {
-    const db = await getSyncDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(tx.error);
-    });
-  } catch (error) {
-    console.error('Error getting local tracks for sync:', error);
-    return [];
-  }
+  return await getAllTracksFromDB();
 };
 
 const saveLocalTrack = async (track: Track): Promise<void> => {
-  try {
-    const db = await getSyncDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE_NAME).put(track);
-    });
-  } catch (error) {
-    console.error('Error saving local track in sync:', error);
-  }
+  await saveTrackToDB(track);
 };
 
 const deleteLocalTrack = async (id: string): Promise<void> => {
-  try {
-    const db = await getSyncDB();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.objectStore(STORE_NAME).delete(id);
-    });
-  } catch (error) {
-    console.error('Error deleting local track in sync:', error);
-  }
+  await deleteTrackFromDB(id);
 };
 
 export interface SyncProgress {
@@ -145,8 +98,12 @@ export const runCloudSync = async (
     if (indexFileId) {
       try {
         cloudIndex = await downloadJSONFromDrive(indexFileId, accessToken);
+        if (!cloudIndex || !Array.isArray(cloudIndex.tracks)) {
+          throw new Error('فهرس السحابة غير صالح');
+        }
       } catch (err) {
-        console.error('Failed to download index, resetting index.json', err);
+        console.error('Failed to download or parse index:', err);
+        throw new Error('فشل قراءة الفهرس السحابي من Google Drive. تم إيقاف المزامنة لحماية مكتبتك من الفقدان.');
       }
     }
 
@@ -178,11 +135,10 @@ export const runCloudSync = async (
     const previouslySyncedIdsStr = localStorage.getItem('synced_track_ids') || '[]';
     const previouslySyncedIds = new Set<string>(JSON.parse(previouslySyncedIdsStr));
 
-    const permanentlyDeletedStr = localStorage.getItem('permanently_deleted_track_ids') || '[]';
-    const permanentlyDeleted = new Set<string>(JSON.parse(permanentlyDeletedStr));
+    const permanentlyDeleted = getPermanentlyDeletedIds();
 
     for (const id of allIds) {
-      if (permanentlyDeleted.has(id)) {
+      if (permanentlyDeleted.has(id) && localTracks.length > 0) {
         const local = localTracksMap.get(id);
         const cloud = cloudTracksMap.get(id);
 
@@ -266,25 +222,23 @@ export const runCloudSync = async (
         }
       } else if (cloud && !local) {
         // Exists in cloud but not local
-        if (previouslySyncedIds.has(id)) {
-          // It was previously synced to this device, but now deleted locally!
-          // So delete it from cloud too
-          console.log(`Track ${id} deleted locally. Deleting from cloud.`);
+        // Only delete from cloud if the user explicitly clicked delete on this device AND has other tracks
+        if (permanentlyDeleted.has(id) && localTracks.length > 0) {
+          console.log(`Track ${id} explicitly deleted by user. Deleting from cloud.`);
           if (cloud.audioFileId) await deleteFileFromDrive(cloud.audioFileId, accessToken).catch(console.error);
           if (cloud.coverFileId) await deleteFileFromDrive(cloud.coverFileId, accessToken).catch(console.error);
         } else {
-          // It is a new track from another device, download it!
+          // Track is in cloud: restore it by downloading to local device!
           tracksToDownload.push(cloud);
         }
       } else if (local && !cloud) {
         // Exists locally but not in cloud
-        if (previouslySyncedIds.has(id)) {
-          // It was previously synced but deleted on cloud, delete locally!
-          console.log(`Track ${id} deleted on cloud. Deleting locally.`);
+        if (permanentlyDeleted.has(id)) {
+          console.log(`Track ${id} marked deleted. Removing from local DB.`);
           await deleteLocalTrack(id);
           localTracksMap.delete(id);
         } else {
-          // New local track, upload it!
+          // Local track should ALWAYS be preserved and uploaded to cloud!
           tracksToUpload.push(local);
         }
       }

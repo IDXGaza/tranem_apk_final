@@ -8,11 +8,16 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.view.KeyEvent
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -51,16 +56,131 @@ class MediaSessionPlugin : Plugin() {
         }
     }
 
+    private val noisyReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                notifyListeners("mediaAction", JSObject().apply { put("action", "pause") })
+                notifyListeners("headsetDisconnected", JSObject())
+            }
+        }
+    }
+
     override fun load() {
         createNotificationChannel()
         
         mediaSession = MediaSessionCompat(context, "TraneemMediaSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
+                private var headsetClickCount = 0
+                private val headsetHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                private var lastEventTime = 0L
+                private var lastKeyCode = 0
+
+                private val headsetRunnable = Runnable {
+                    when (headsetClickCount) {
+                        1 -> notifyListeners("mediaAction", JSObject().apply { put("action", "toggle") })
+                        2 -> notifyListeners("mediaAction", JSObject().apply { put("action", "next") })
+                        3 -> notifyListeners("mediaAction", JSObject().apply { put("action", "previous") })
+                    }
+                    headsetClickCount = 0
+                }
+
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    val keyEvent = mediaButtonEvent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT) ?: return super.onMediaButtonEvent(mediaButtonEvent)
+                    
+                    // Touch earbuds often send ACTION_DOWN only, or rapid DOWN+UP.
+                    // Process on ACTION_DOWN (or single ACTION_UP) with 70ms deduplication window.
+                    val now = System.currentTimeMillis()
+                    val isRepeat = (now - lastEventTime < 70) && (lastKeyCode == keyEvent.keyCode)
+                    
+                    if (keyEvent.action == KeyEvent.ACTION_DOWN) {
+                        lastEventTime = now
+                        lastKeyCode = keyEvent.keyCode
+
+                        when (keyEvent.keyCode) {
+                            KeyEvent.KEYCODE_HEADSETHOOK,
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                                headsetHandler.removeCallbacks(headsetRunnable)
+                                headsetClickCount++
+                                if (headsetClickCount >= 3) {
+                                    headsetRunnable.run()
+                                } else {
+                                    headsetHandler.postDelayed(headsetRunnable, 380)
+                                }
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "play") })
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "pause") })
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_NEXT,
+                            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+                            KeyEvent.KEYCODE_MEDIA_STEP_FORWARD -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "next") })
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                            KeyEvent.KEYCODE_MEDIA_REWIND,
+                            KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "previous") })
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "stop") })
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_RECORD -> {
+                                notifyListeners("mediaAction", JSObject().apply { put("action", "toggle") })
+                                return true
+                            }
+                        }
+                    } else if (keyEvent.action == KeyEvent.ACTION_UP && !isRepeat) {
+                        // Fallback for earbuds that only emit ACTION_UP
+                        if (now - lastEventTime > 150) {
+                            when (keyEvent.keyCode) {
+                                KeyEvent.KEYCODE_HEADSETHOOK,
+                                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                                    headsetHandler.removeCallbacks(headsetRunnable)
+                                    headsetClickCount++
+                                    if (headsetClickCount >= 3) {
+                                        headsetRunnable.run()
+                                    } else {
+                                        headsetHandler.postDelayed(headsetRunnable, 380)
+                                    }
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                    notifyListeners("mediaAction", JSObject().apply { put("action", "play") })
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                    notifyListeners("mediaAction", JSObject().apply { put("action", "pause") })
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_NEXT,
+                                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                                    notifyListeners("mediaAction", JSObject().apply { put("action", "next") })
+                                    return true
+                                }
+                                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                                    notifyListeners("mediaAction", JSObject().apply { put("action", "previous") })
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                    return super.onMediaButtonEvent(mediaButtonEvent)
+                }
+
                 override fun onPlay() {
-                    notifyListeners("mediaAction", JSObject().apply { put("action", "toggle") })
+                    notifyListeners("mediaAction", JSObject().apply { put("action", "play") })
                 }
                 override fun onPause() {
-                    notifyListeners("mediaAction", JSObject().apply { put("action", "toggle") })
+                    notifyListeners("mediaAction", JSObject().apply { put("action", "pause") })
                 }
                 override fun onSkipToNext() {
                     notifyListeners("mediaAction", JSObject().apply { put("action", "next") })
@@ -68,8 +188,20 @@ class MediaSessionPlugin : Plugin() {
                 override fun onSkipToPrevious() {
                     notifyListeners("mediaAction", JSObject().apply { put("action", "previous") })
                 }
+                override fun onFastForward() {
+                    notifyListeners("mediaAction", JSObject().apply { put("action", "next") })
+                }
+                override fun onRewind() {
+                    notifyListeners("mediaAction", JSObject().apply { put("action", "previous") })
+                }
                 override fun onStop() {
                     notifyListeners("mediaAction", JSObject().apply { put("action", "stop") })
+                }
+                override fun onSeekTo(pos: Long) {
+                    notifyListeners("mediaAction", JSObject().apply { 
+                        put("action", "seek") 
+                        put("position", pos / 1000.0)
+                    })
                 }
             })
             setFlags(
@@ -80,7 +212,7 @@ class MediaSessionPlugin : Plugin() {
         }
         activeSession = mediaSession
         activePlugin = this
-        updatePlaybackState(false)
+        updatePlaybackState(false, 0.0)
 
         val filter = android.content.IntentFilter().apply {
             addAction("com.idxgaza.traneem.MEDIA_PREVIOUS")
@@ -92,6 +224,13 @@ class MediaSessionPlugin : Plugin() {
         } else {
             context.registerReceiver(receiver, filter)
         }
+
+        try {
+            val noisyFilter = android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            context.registerReceiver(noisyReceiver, noisyFilter)
+        } catch (e: Exception) {
+            // ignore
+        }
     }
 
     private fun createNotificationChannel() {
@@ -101,11 +240,60 @@ class MediaSessionPlugin : Plugin() {
                 "ترانيم - تشغيل الصوت",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "إشعار التحكم في تشغيل الأناشيد"
+                description = "إشعار التحكم في تشغيل الأناشيد من شاشة القفل ولوحة الإشعارات"
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(null, null)
             }
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
+        }
+    }
+
+    @PluginMethod
+    fun requestNotificationPermission(call: PluginCall) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            
+            if (granted) {
+                call.resolve(JSObject().apply { put("granted", true) })
+            } else {
+                try {
+                    ActivityCompat.requestPermissions(
+                        activity,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        1001
+                    )
+                    call.resolve(JSObject().apply { 
+                        put("granted", false)
+                        put("requested", true) 
+                    })
+                } catch (e: Exception) {
+                    call.resolve(JSObject().apply { 
+                        put("granted", false)
+                        put("error", e.message ?: "Failed to request permission") 
+                    })
+                }
+            }
+        } else {
+            // Android 12 and below do not require runtime POST_NOTIFICATIONS
+            call.resolve(JSObject().apply { put("granted", true) })
+        }
+    }
+
+    @PluginMethod
+    fun checkNotificationPermission(call: PluginCall) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            call.resolve(JSObject().apply { put("granted", granted) })
+        } else {
+            call.resolve(JSObject().apply { put("granted", true) })
         }
     }
 
@@ -115,25 +303,48 @@ class MediaSessionPlugin : Plugin() {
         val artist = call.getString("artist") ?: ""
         val artworkUrl = call.getString("artworkUrl") ?: ""
         val isPlaying = call.getBoolean("isPlaying") ?: false
+        val duration = call.getDouble("duration") ?: 0.0
+        val position = call.getDouble("position") ?: 0.0
 
         Thread {
             var bitmap: Bitmap? = null
-            if (artworkUrl.isNotEmpty() && artworkUrl.startsWith("http")) {
-                try {
-                    bitmap = BitmapFactory.decodeStream(URL(artworkUrl).openStream())
-                } catch (e: Exception) {
-                    // استمر بدون صورة
+            if (artworkUrl.isNotEmpty()) {
+                if (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://")) {
+                    try {
+                        val connection = URL(artworkUrl).openConnection()
+                        connection.connectTimeout = 3000
+                        connection.readTimeout = 4000
+                        bitmap = BitmapFactory.decodeStream(connection.getInputStream())
+                    } catch (e: Exception) {
+                        // استمر بدون صورة
+                    }
+                } else if (artworkUrl.startsWith("data:image")) {
+                    try {
+                        val base64Data = artworkUrl.substringAfter("base64,")
+                        val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+                        bitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+                    } catch (e: Exception) {
+                        // استمر بدون صورة
+                    }
                 }
             }
             val finalBitmap = bitmap
             activity.runOnUiThread {
-                val metadata = MediaMetadataCompat.Builder()
+                val durationMs = (duration * 1000).toLong()
+                val metadataBuilder = MediaMetadataCompat.Builder()
                     .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                     .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                    .apply { if (finalBitmap != null) putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, finalBitmap) }
-                    .build()
-                mediaSession?.setMetadata(metadata)
-                updatePlaybackState(isPlaying)
+                
+                if (durationMs > 0) {
+                    metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+                }
+                if (finalBitmap != null) {
+                    metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, finalBitmap)
+                    metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, finalBitmap)
+                }
+                
+                mediaSession?.setMetadata(metadataBuilder.build())
+                updatePlaybackState(isPlaying, position)
 
                 val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
 
@@ -209,13 +420,16 @@ class MediaSessionPlugin : Plugin() {
     @PluginMethod
     fun updatePlaybackState(call: PluginCall) {
         val isPlaying = call.getBoolean("isPlaying") ?: false
-        updatePlaybackState(isPlaying)
+        val position = call.getDouble("position") ?: 0.0
+        updatePlaybackState(isPlaying, position)
         call.resolve()
     }
 
-    private fun updatePlaybackState(isPlaying: Boolean) {
-        mediaSession?.isActive = isPlaying
+    private fun updatePlaybackState(isPlaying: Boolean, positionSeconds: Double = 0.0) {
+        mediaSession?.isActive = true
         val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+        val positionMs = (positionSeconds * 1000).toLong()
+        
         val playbackState = PlaybackStateCompat.Builder()
             .setActions(
                 PlaybackStateCompat.ACTION_PLAY or
@@ -223,15 +437,36 @@ class MediaSessionPlugin : Plugin() {
                 PlaybackStateCompat.ACTION_PLAY_PAUSE or
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                 PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_STOP
+                PlaybackStateCompat.ACTION_STOP or
+                PlaybackStateCompat.ACTION_SEEK_TO
             )
-            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f)
+            .setState(state, if (positionMs >= 0) positionMs else PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
             .build()
         mediaSession?.setPlaybackState(playbackState)
     }
 
     private fun showNotification(title: String, artist: String, artwork: Bitmap?, isPlaying: Boolean) {
         val token = mediaSession?.sessionToken ?: return
+
+        // On Android 13+, check POST_NOTIFICATIONS permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                try {
+                    ActivityCompat.requestPermissions(
+                        activity,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        1001
+                    )
+                } catch (e: Exception) {
+                    // ignore
+                }
+                return
+            }
+        }
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
         val pendingIntent = PendingIntent.getActivity(
@@ -257,13 +492,21 @@ class MediaSessionPlugin : Plugin() {
 
         val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
 
+        val smallIconRes = try {
+            val appIcon = context.applicationInfo.icon
+            if (appIcon != 0) appIcon else android.R.drawable.ic_media_play
+        } catch (e: Exception) {
+            android.R.drawable.ic_media_play
+        }
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(smallIconRes)
             .setContentTitle(title)
-            .setContentText(artist)
+            .setContentText(if (artist.isNotEmpty()) artist else "ترانيم")
             .setContentIntent(pendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setOnlyAlertOnce(true)
             .setOngoing(isPlaying)
             .apply { if (artwork != null) setLargeIcon(artwork) }
@@ -288,11 +531,65 @@ class MediaSessionPlugin : Plugin() {
         call.resolve()
     }
 
+    @PluginMethod
+    fun isHeadsetConnected(call: PluginCall) {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var connected = false
+        var deviceName = "مكبر الصوت"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            for (device in devices) {
+                when (device.type) {
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
+                        connected = true
+                        deviceName = "سماعة سلكية"
+                        break
+                    }
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                    AudioDeviceInfo.TYPE_BLE_HEADSET -> {
+                        connected = true
+                        deviceName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && device.productName.isNotEmpty()) {
+                            device.productName.toString()
+                        } else {
+                            "سماعة بلوتوث"
+                        }
+                        break
+                    }
+                    AudioDeviceInfo.TYPE_USB_HEADSET -> {
+                        connected = true
+                        deviceName = "سماعة USB"
+                        break
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            if (audioManager.isWiredHeadsetOn) {
+                connected = true
+                deviceName = "سماعة سلكية"
+            } else if (audioManager.isBluetoothA2dpOn) {
+                connected = true
+                deviceName = "سماعة بلوتوث"
+            }
+        }
+        call.resolve(JSObject().apply {
+            put("connected", connected)
+            put("deviceName", deviceName)
+        })
+    }
+
     override fun handleOnDestroy() {
         if (activePlugin == this) activePlugin = null
         if (activeSession == mediaSession) activeSession = null
         try {
             context.unregisterReceiver(receiver)
+        } catch (e: Exception) {
+            // Ignore if not registered
+        }
+        try {
+            context.unregisterReceiver(noisyReceiver)
         } catch (e: Exception) {
             // Ignore if not registered
         }
