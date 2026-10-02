@@ -1160,11 +1160,62 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     checkNotificationPermissionStatus();
   }, [checkNotificationPermissionStatus]);
 
-  const updateMediaSession = useCallback(async (isPlaying: boolean, overrideDuration?: number, overridePosition?: number) => {
+  const coverDataUrlCacheRef = useRef<Map<string, string>>(new Map());
+
+  const getTrackCoverArtwork = useCallback(async (track: Track): Promise<string> => {
+    if (!track) return UNIFORM_PLACEHOLDER;
+    if (track.coverUrl && track.coverUrl.startsWith('data:image')) {
+      return track.coverUrl;
+    }
+    if (coverDataUrlCacheRef.current.has(track.id)) {
+      return coverDataUrlCacheRef.current.get(track.id)!;
+    }
+
+    let blob: Blob | null = track.coverBlob || null;
+    if (!blob && track.coverUrl && track.coverUrl.startsWith('blob:')) {
+      try {
+        const res = await fetch(track.coverUrl);
+        blob = await res.blob();
+      } catch (e) {}
+    }
+
+    if (!blob) {
+      try {
+        const dbTrack = await getTrackFromDB(track.id);
+        if (dbTrack?.coverBlob) {
+          blob = dbTrack.coverBlob;
+        }
+      } catch (e) {}
+    }
+
+    if (blob) {
+      return new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const dataUrl = reader.result as string;
+          if (dataUrl) {
+            coverDataUrlCacheRef.current.set(track.id, dataUrl);
+            resolve(dataUrl);
+          } else {
+            resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
+          }
+        };
+        reader.onerror = () => resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    if (track.coverUrl && (track.coverUrl.startsWith('http://') || track.coverUrl.startsWith('https://'))) {
+      return track.coverUrl;
+    }
+
+    return UNIFORM_PLACEHOLDER;
+  }, []);
+
+  const updateMediaSession = useCallback(async (isPlaying: boolean, overrideDuration?: number, overridePosition?: number, explicitTrack?: Track) => {
     const currentIdx = currentTrackIndexRef.current;
     const currentTracks = tracksRef.current;
-    if (currentIdx === null) return;
-    const track = currentTracks[currentIdx];
+    const track = explicitTrack || (currentIdx !== null ? currentTracks[currentIdx] : null);
     if (!track) return;
 
     const audio = audioRef.current;
@@ -1212,14 +1263,12 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     // Native Capacitor Android MediaSession
     if (Capacitor.isNativePlatform()) {
       try {
-        const artworkUrl = (track.coverUrl && (track.coverUrl.startsWith('http://') || track.coverUrl.startsWith('https://') || track.coverUrl.startsWith('data:image')))
-          ? track.coverUrl
-          : UNIFORM_PLACEHOLDER;
+        const customArtwork = await getTrackCoverArtwork(track);
 
         await MediaSession.updateMetadata({
           title: track.name,
           artist: track.artist || 'ترانيم',
-          artworkUrl,
+          artworkUrl: customArtwork,
           isPlaying,
           duration,
           position
@@ -1228,7 +1277,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         console.warn('Native MediaSession error:', e);
       }
     }
-  }, []);
+  }, [getTrackCoverArtwork]);
 
   const handleSeek = useCallback((time: number) => {
     const audio = audioRef.current;
@@ -1302,7 +1351,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     localStorage.setItem('lastPlayedTrackId', track.id);
     setCurrentTrackIndex(index);
     setPlayerState(prev => ({ ...prev, isPlaying: true, currentTime: 0 }));
-    updateMediaSession(true);
+    updateMediaSession(true, undefined, undefined, updatedTrack);
     
     let playUrl = track.url;
     if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
@@ -1848,8 +1897,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         sourceType: 'import',
         lastModified: new Date().toISOString()
       };
+      coverDataUrlCacheRef.current.delete(currentTrack.id);
       setTracks(prev => prev.map(t => t.id === currentTrack.id ? updatedTrack : t));
       saveTrackToDB(updatedTrack);
+      updateMediaSession(isPlayingRef.current, undefined, undefined, updatedTrack);
     } catch (error) {
       console.error("Error saving cropped image:", error);
       alert("حدث خطأ أثناء حفظ الصورة");
@@ -2025,13 +2076,25 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   return (
     <div 
       dir="rtl"
-      className={`flex flex-col h-screen h-[100dvh] bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden font-cairo ${!isRecording ? 'watercolor-bg' : ''} relative transition-colors duration-300`}
+      className={`flex flex-col h-screen h-[100dvh] bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden font-cairo relative transition-colors duration-500`}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
+      {/* خلفية صورة الأنشودة الحالية الضبابية الفائقة (Ambient Artwork Backdrop) */}
+      {currentTrack?.coverUrl && !isRecording && (
+        <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden select-none transition-all duration-1000">
+          <img
+            src={currentTrack.coverUrl}
+            alt=""
+            className="w-full h-full object-cover scale-150 blur-[90px] md:blur-[120px] opacity-25 dark:opacity-30 saturate-150 transform transition-all duration-1000"
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-white/40 to-white/75 dark:from-slate-950/70 dark:via-slate-950/50 dark:to-slate-950/85 backdrop-blur-[2px] transition-colors duration-500" />
+        </div>
+      )}
+
       {/* الهيدر العلوي */}
-      <header className="flex items-center justify-between p-4 bg-white/80 dark:bg-slate-950/80 backdrop-blur-lg border-b border-slate-100 dark:border-slate-800 shrink-0 z-[100] relative">
+      <header className="flex items-center justify-between p-4 bg-white/70 dark:bg-slate-950/70 backdrop-blur-xl border-b border-slate-200/50 dark:border-slate-800/50 shrink-0 z-[100] relative">
         <div className="flex items-center gap-1 md:gap-3">
           {!isRecording && (
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-[#4da8ab] active:scale-95 transition-transform">
@@ -2119,7 +2182,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         )}
         
         <main className="flex-1 overflow-y-auto scroll-container bg-transparent relative z-10 flex flex-col items-center">
-          <div className="px-4 py-8 md:px-8 md:py-12 lg:px-16 lg:py-16 pb-40 md:pb-48 max-w-6xl mx-auto w-full flex-1 flex flex-col items-center justify-start min-h-[500px] bg-white dark:bg-slate-950 transition-colors duration-300">
+          <div className="px-4 py-8 md:px-8 md:py-12 lg:px-16 lg:py-16 pb-40 md:pb-48 max-w-6xl mx-auto w-full flex-1 flex flex-col items-center justify-start min-h-[500px] bg-white/60 dark:bg-slate-950/60 backdrop-blur-md rounded-3xl my-2 border border-slate-200/30 dark:border-slate-800/30 shadow-xl transition-colors duration-500">
             {isRecording ? (
               <RecordingScreen 
                 getAnalyser={getAnalyser}

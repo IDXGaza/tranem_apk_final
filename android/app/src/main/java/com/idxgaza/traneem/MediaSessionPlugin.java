@@ -390,6 +390,11 @@ public class MediaSessionPlugin extends Plugin {
         }
     }
 
+    private String lastTitle = "ترانيم";
+    private String lastArtist = "";
+    private Bitmap lastBitmap = null;
+    private boolean lastIsPlaying = false;
+
     @PluginMethod
     public void updateMetadata(PluginCall call) {
         final String title = call.getString("title", "ترانيم");
@@ -399,56 +404,91 @@ public class MediaSessionPlugin extends Plugin {
         final double duration = call.getDouble("duration", 0.0);
         final double position = call.getDouble("position", 0.0);
 
-        new Thread(new Runnable() {
+        lastTitle = title;
+        lastArtist = artist;
+        lastIsPlaying = isPlaying;
+
+        final long durationMs = (long) (duration * 1000);
+
+        // Immediate check: If artwork is base64 data, decode it instantly on the spot
+        Bitmap instantBitmap = lastBitmap;
+        if (artworkUrl != null && artworkUrl.startsWith("data:image")) {
+            try {
+                String base64Data = artworkUrl.substring(artworkUrl.indexOf("base64,") + 7);
+                byte[] decodedBytes = Base64.decode(base64Data, Base64.DEFAULT);
+                instantBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
+                if (instantBitmap != null) {
+                    lastBitmap = instantBitmap;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        final Bitmap targetBitmap = instantBitmap;
+
+        // Immediate 0ms UI update with target cover bitmap
+        getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                Bitmap bitmap = null;
-                if (artworkUrl != null && !artworkUrl.isEmpty()) {
-                    if (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://")) {
-                        try {
-                            java.net.URLConnection connection = new URL(artworkUrl).openConnection();
-                            connection.setConnectTimeout(3000);
-                            connection.setReadTimeout(4000);
-                            InputStream input = connection.getInputStream();
-                            bitmap = BitmapFactory.decodeStream(input);
-                        } catch (Exception ignored) {
-                        }
-                    } else if (artworkUrl.startsWith("data:image")) {
-                        try {
-                            String base64Data = artworkUrl.substring(artworkUrl.indexOf("base64,") + 7);
-                            byte[] decodedBytes = Base64.decode(base64Data, Base64.DEFAULT);
-                            bitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
-                        } catch (Exception ignored) {
-                        }
+                if (mediaSession != null) {
+                    MediaMetadataCompat.Builder immediateBuilder = new MediaMetadataCompat.Builder()
+                        .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
+
+                    if (durationMs > 0) {
+                        immediateBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                    }
+                    if (targetBitmap != null) {
+                        immediateBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, targetBitmap);
+                        immediateBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, targetBitmap);
+                    }
+                    mediaSession.setMetadata(immediateBuilder.build());
+                }
+                updatePlaybackStateInternal(isPlaying, position);
+                showNotification(title, artist, targetBitmap, isPlaying);
+            }
+        });
+
+        // Background asynchronous artwork fetching only for remote HTTP/HTTPS URLs
+        if (artworkUrl != null && (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://"))) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    Bitmap bitmap = null;
+                    try {
+                        java.net.URLConnection connection = new URL(artworkUrl).openConnection();
+                        connection.setConnectTimeout(2500);
+                        connection.setReadTimeout(3000);
+                        InputStream input = connection.getInputStream();
+                        bitmap = BitmapFactory.decodeStream(input);
+                    } catch (Exception ignored) {
+                    }
+
+                    if (bitmap != null) {
+                        lastBitmap = bitmap;
+                        final Bitmap finalBitmap = bitmap;
+                        getActivity().runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (mediaSession != null) {
+                                    MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder()
+                                        .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
+
+                                    if (durationMs > 0) {
+                                        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                                    }
+                                    metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, finalBitmap);
+                                    metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, finalBitmap);
+
+                                    mediaSession.setMetadata(metadataBuilder.build());
+                                }
+                                showNotification(title, artist, finalBitmap, lastIsPlaying);
+                            }
+                        });
                     }
                 }
-                final Bitmap finalBitmap = bitmap;
-
-                getActivity().runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        long durationMs = (long) (duration * 1000);
-                        MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder()
-                            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
-
-                        if (durationMs > 0) {
-                            metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
-                        }
-                        if (finalBitmap != null) {
-                            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, finalBitmap);
-                            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, finalBitmap);
-                        }
-
-                        if (mediaSession != null) {
-                            mediaSession.setMetadata(metadataBuilder.build());
-                        }
-                        updatePlaybackStateInternal(isPlaying, position);
-                        showNotification(title, artist, finalBitmap, isPlaying);
-                    }
-                });
-            }
-        }).start();
+            }).start();
+        }
 
         call.resolve();
     }
@@ -457,7 +497,9 @@ public class MediaSessionPlugin extends Plugin {
     public void updatePlaybackState(PluginCall call) {
         boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
         double position = call.getDouble("position", 0.0);
+        lastIsPlaying = isPlaying;
         updatePlaybackStateInternal(isPlaying, position);
+        showNotification(lastTitle, lastArtist, lastBitmap, isPlaying);
         call.resolve();
     }
 
