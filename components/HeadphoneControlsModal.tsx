@@ -5,7 +5,6 @@ import {
   Radio,
   Check,
   X,
-  ShieldCheck,
   Play,
   Pause,
   SkipForward,
@@ -14,13 +13,13 @@ import {
   Sparkles,
   Zap,
   RotateCcw,
-  VolumeX,
   Volume1,
   FastForward,
   Rewind,
   Shuffle,
   Settings2,
-  Activity
+  Activity,
+  SlidersHorizontal
 } from 'lucide-react';
 
 export type SoundProfile = 'balanced' | 'vocal' | 'bass' | 'boost' | 'custom';
@@ -46,7 +45,16 @@ export type HeadphoneActionType =
   | 'volume_down'
   | 'none';
 
+export interface EarbudActions {
+  singleTap: HeadphoneActionType;
+  doubleTap: HeadphoneActionType;
+  tripleTap: HeadphoneActionType;
+  longPress: HeadphoneActionType;
+}
+
 export interface HeadphoneGestureSettings {
+  leftEarbud: EarbudActions;
+  rightEarbud: EarbudActions;
   singleTap: HeadphoneActionType;
   doubleTap: HeadphoneActionType;
   tripleTap: HeadphoneActionType;
@@ -55,6 +63,18 @@ export interface HeadphoneGestureSettings {
 }
 
 export const DEFAULT_HEADPHONE_GESTURES: HeadphoneGestureSettings = {
+  leftEarbud: {
+    singleTap: 'toggle',
+    doubleTap: 'previous',
+    tripleTap: 'seek_backward_10',
+    longPress: 'volume_down'
+  },
+  rightEarbud: {
+    singleTap: 'toggle',
+    doubleTap: 'next',
+    tripleTap: 'seek_forward_10',
+    longPress: 'volume_up'
+  },
   singleTap: 'toggle',
   doubleTap: 'next',
   tripleTap: 'previous',
@@ -120,13 +140,22 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
   gestureSettings,
   onGestureSettingsChange
 }) => {
-  const [activeTab, setActiveTab] = useState<'equalizer' | 'gestures'>('equalizer');
+  const [activeTab, setActiveTab] = useState<'presets' | 'custom_eq' | 'gestures'>('presets');
+  const [activeEarbudSide, setActiveEarbudSide] = useState<'right' | 'left'>('right');
   const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('default');
   const [autoPauseOnUnplug, setAutoPauseOnUnplug] = useState<boolean>(() => {
     return localStorage.getItem('traneem_auto_pause_unplug') !== 'false';
   });
   const [activeTestFeedback, setActiveTestFeedback] = useState<string | null>(null);
+
+  // Fallback migration for existing saved settings
+  const currentSettings: HeadphoneGestureSettings = {
+    ...DEFAULT_HEADPHONE_GESTURES,
+    ...gestureSettings,
+    leftEarbud: { ...DEFAULT_HEADPHONE_GESTURES.leftEarbud, ...(gestureSettings?.leftEarbud || {}) },
+    rightEarbud: { ...DEFAULT_HEADPHONE_GESTURES.rightEarbud, ...(gestureSettings?.rightEarbud || {}) }
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -162,14 +191,35 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
     localStorage.setItem('traneem_auto_pause_unplug', nextVal.toString());
   };
 
-  const handleUpdateGesture = (key: keyof HeadphoneGestureSettings, value: HeadphoneActionType) => {
-    const next = { ...gestureSettings, [key]: value };
+  const handleUpdateEarbudAction = (side: 'left' | 'right', gesture: keyof EarbudActions, value: HeadphoneActionType) => {
+    const sideKey = side === 'left' ? 'leftEarbud' : 'rightEarbud';
+    const next: HeadphoneGestureSettings = {
+      ...currentSettings,
+      [sideKey]: {
+        ...currentSettings[sideKey],
+        [gesture]: value
+      }
+    };
+    // Sync unified single/double/triple tap if right side modified
+    if (side === 'right') {
+      if (gesture === 'singleTap') next.singleTap = value;
+      if (gesture === 'doubleTap') next.doubleTap = value;
+      if (gesture === 'tripleTap') next.tripleTap = value;
+    }
+    onGestureSettingsChange(next);
+  };
+
+  const handleUpdateHardwareButton = (buttonKey: 'nextButton' | 'prevButton', value: HeadphoneActionType) => {
+    const next: HeadphoneGestureSettings = {
+      ...currentSettings,
+      [buttonKey]: value
+    };
     onGestureSettingsChange(next);
   };
 
   const handleResetGestures = () => {
     onGestureSettingsChange(DEFAULT_HEADPHONE_GESTURES);
-    setActiveTestFeedback('تمت إعادة ضبط الأوامر إلى الإعدادات الافتراضية');
+    setActiveTestFeedback('تمت استعادة الإعدادات الافتراضية للسماعتين بنجاح');
     setTimeout(() => setActiveTestFeedback(null), 2500);
   };
 
@@ -210,6 +260,8 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
 
   if (!isOpen) return null;
 
+  const currentEarbudConfig = activeEarbudSide === 'right' ? currentSettings.rightEarbud : currentSettings.leftEarbud;
+
   return (
     <div
       className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
@@ -223,8 +275,8 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
               <Headphones className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">إعدادات السماعات والصوت المتقدمة</h2>
-              <p className="text-xs text-slate-400">موازن الصوت، وتخصيص أوامر أزرار ولمسات السماعات</p>
+              <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">إعدادات السماعات والصوت</h2>
+              <p className="text-xs text-slate-400">موازن الصوت، المعادل اليدوي، وتخصيص السماعتين (يمين / يسار)</p>
             </div>
           </div>
           <button
@@ -235,29 +287,45 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
           </button>
         </div>
 
-        {/* شريط التبويبات */}
+        {/* شريط التبويبات الثلاثة المنسقة */}
         <div className="flex border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 p-1.5 gap-1.5 px-4">
           <button
-            onClick={() => setActiveTab('equalizer')}
-            className={`flex-1 py-2.5 px-3 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-              activeTab === 'equalizer'
+            onClick={() => setActiveTab('presets')}
+            className={`flex-1 py-2 px-2.5 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+              activeTab === 'presets'
                 ? 'bg-white dark:bg-slate-800 text-[#4da8ab] shadow-sm'
                 : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
             }`}
           >
-            <Sliders className="w-3.5 h-3.5" />
-            <span>موازن الصوت (Equalizer)</span>
+            <Activity className="w-3.5 h-3.5" />
+            <span>أوضاع الصوت</span>
           </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('custom_eq');
+              onSoundProfileChange('custom');
+            }}
+            className={`flex-1 py-2 px-2.5 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+              activeTab === 'custom_eq'
+                ? 'bg-white dark:bg-slate-800 text-[#4da8ab] shadow-sm'
+                : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
+            }`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            <span>المعادل اليدوي</span>
+          </button>
+
           <button
             onClick={() => setActiveTab('gestures')}
-            className={`flex-1 py-2.5 px-3 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+            className={`flex-1 py-2 px-2.5 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
               activeTab === 'gestures'
                 ? 'bg-white dark:bg-slate-800 text-[#4da8ab] shadow-sm'
                 : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
             }`}
           >
             <Settings2 className="w-3.5 h-3.5" />
-            <span>تخصيص أوامر السماعة</span>
+            <span>تخصيص السماعات (L/R)</span>
           </button>
         </div>
 
@@ -286,14 +354,14 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
             </span>
           </div>
 
-          {/* تبويب 1: موازن الصوت */}
-          {activeTab === 'equalizer' && (
+          {/* تبويب 1: أوضاع الصوت الجاهزة */}
+          {activeTab === 'presets' && (
             <div className="space-y-4">
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <h3 className="text-xs font-bold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5 text-[#4da8ab]" />
-                    <span>أوضاع المعادل الصوتي المحسنة (High-Impact Presets)</span>
+                    <span>أوضاع المعادل الصوتي المحسنة (Equalizer Presets)</span>
                   </h3>
                   <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full font-bold">
                     معالجة صوتية حية 🎵
@@ -380,122 +448,10 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                 </button>
               </div>
 
-              {/* وضع التخصيص اليدوي */}
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3.5">
-                <div className="flex items-center justify-between">
-                  <button
-                    onClick={() => onSoundProfileChange('custom')}
-                    className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200 hover:text-[#4da8ab]"
-                  >
-                    <Sliders className="w-4 h-4 text-[#4da8ab]" />
-                    <span>تخصيص يدوي حر (Custom Equalizer Sliders)</span>
-                  </button>
-                  <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-lg ${
-                      soundProfile === 'custom'
-                        ? 'bg-[#4da8ab] text-white'
-                        : 'bg-slate-200 dark:bg-slate-700 text-slate-500'
-                    }`}
-                  >
-                    {soundProfile === 'custom' ? 'مفعل حالياً ✅' : 'اضغط للتفعيل'}
-                  </span>
-                </div>
-
-                <div className="space-y-3 pt-1">
-                  {/* Bass slider */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="font-semibold text-slate-600 dark:text-slate-300">البيس والجهير (Bass):</span>
-                      <span className="font-mono text-[#4da8ab] font-bold">
-                        {customEq.bass > 0 ? `+${customEq.bass}` : customEq.bass} dB
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-10"
-                      max="18"
-                      step="1"
-                      value={customEq.bass}
-                      onChange={(e) => {
-                        onSoundProfileChange('custom');
-                        onCustomEqChange({ ...customEq, bass: parseFloat(e.target.value) });
-                      }}
-                      className="w-full accent-[#4da8ab] cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Mid/Vocal slider */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="font-semibold text-slate-600 dark:text-slate-300">وضوح المنشد والكلمات (Vocals):</span>
-                      <span className="font-mono text-[#4da8ab] font-bold">
-                        {customEq.mid > 0 ? `+${customEq.mid}` : customEq.mid} dB
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-10"
-                      max="18"
-                      step="1"
-                      value={customEq.mid}
-                      onChange={(e) => {
-                        onSoundProfileChange('custom');
-                        onCustomEqChange({ ...customEq, mid: parseFloat(e.target.value) });
-                      }}
-                      className="w-full accent-[#4da8ab] cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Treble slider */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="font-semibold text-slate-600 dark:text-slate-300">نقاء الترددات العالية (Treble):</span>
-                      <span className="font-mono text-[#4da8ab] font-bold">
-                        {customEq.treble > 0 ? `+${customEq.treble}` : customEq.treble} dB
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-10"
-                      max="18"
-                      step="1"
-                      value={customEq.treble}
-                      onChange={(e) => {
-                        onSoundProfileChange('custom');
-                        onCustomEqChange({ ...customEq, treble: parseFloat(e.target.value) });
-                      }}
-                      className="w-full accent-[#4da8ab] cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Gain boost slider */}
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="font-semibold text-slate-600 dark:text-slate-300">مضخم الطاقة الكلي (Master Gain):</span>
-                      <span className="font-mono text-amber-500 font-bold">
-                        {Math.round(customEq.gain * 100)}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.8"
-                      max="1.9"
-                      step="0.05"
-                      value={customEq.gain}
-                      onChange={(e) => {
-                        onSoundProfileChange('custom');
-                        onCustomEqChange({ ...customEq, gain: parseFloat(e.target.value) });
-                      }}
-                      className="w-full accent-amber-500 cursor-pointer"
-                    />
-                  </div>
-                </div>
-              </div>
-
               {/* خيار الإيقاف التلقائي عند نزع السماعة */}
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <ShieldCheck className="w-5 h-5 text-[#4da8ab]" />
+                  <Headphones className="w-5 h-5 text-[#4da8ab]" />
                   <div>
                     <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200">
                       إيقاف مؤقت تلقائي عند نزع السماعة
@@ -516,46 +472,158 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                   />
                 </button>
               </div>
-
-              {/* قائمة أجهزة الإخراج إذا توفرت عبر المتصفح */}
-              {outputDevices.length > 1 && (
-                <div className="space-y-2.5">
-                  <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                    <Volume2 className="w-3.5 h-3.5 text-[#4da8ab]" />
-                    <span>تبديل مخرج الصوت يدوياً</span>
-                  </h3>
-                  <div className="space-y-1.5">
-                    {outputDevices.map((dev) => (
-                      <button
-                        key={dev.deviceId}
-                        onClick={() => handleDeviceChange(dev.deviceId)}
-                        className={`w-full p-3 rounded-2xl border text-xs flex items-center justify-between transition-all ${
-                          selectedDeviceId === dev.deviceId
-                            ? 'bg-[#4da8ab]/10 border-[#4da8ab] text-[#4da8ab] font-bold'
-                            : 'bg-slate-50 dark:bg-slate-800/40 border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300'
-                        }`}
-                      >
-                        <span className="truncate">{dev.label || `مخرج صوت (${dev.deviceId.slice(0, 5)})`}</span>
-                        {selectedDeviceId === dev.deviceId && <Check className="w-4 h-4 text-[#4da8ab] shrink-0" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
-          {/* تبويب 2: تخصيص أوامر السماعة */}
+          {/* تبويب 2: المعادل اليدوي المتقدم المخصص */}
+          {activeTab === 'custom_eq' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                    <SlidersHorizontal className="w-4 h-4 text-[#4da8ab]" />
+                    <span>المعادل الصوتي اليدوي (Custom Equalizer)</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    تحكم دقيق وفوري في ترددات البيس، الكلمات، والترددات الحادة
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const defaultEq = { bass: 0, mid: 0, treble: 0, gain: 1.0 };
+                    onCustomEqChange(defaultEq);
+                    onSoundProfileChange('custom');
+                  }}
+                  className="text-[10px] font-bold text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20 px-2.5 py-1 rounded-xl transition-all flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>تصفير</span>
+                </button>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-4">
+                {/* Bass slider */}
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-bold text-slate-700 dark:text-slate-200">البيس والجهير العميق (Sub-Bass 80Hz):</span>
+                    <span className="font-mono text-[#4da8ab] font-bold">
+                      {customEq.bass > 0 ? `+${customEq.bass}` : customEq.bass} dB
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-12"
+                    max="18"
+                    step="1"
+                    value={customEq.bass}
+                    onChange={(e) => {
+                      onSoundProfileChange('custom');
+                      onCustomEqChange({ ...customEq, bass: parseFloat(e.target.value) });
+                    }}
+                    className="w-full accent-[#4da8ab] cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[9px] text-slate-400 font-mono">
+                    <span>-12 dB (خافت)</span>
+                    <span>0 dB (طبيعي)</span>
+                    <span>+18 dB (أقصى بيس)</span>
+                  </div>
+                </div>
+
+                {/* Mid/Vocal slider */}
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-bold text-slate-700 dark:text-slate-200">وضوح المنشد والكلمات (Vocals 2.8kHz):</span>
+                    <span className="font-mono text-[#4da8ab] font-bold">
+                      {customEq.mid > 0 ? `+${customEq.mid}` : customEq.mid} dB
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-12"
+                    max="18"
+                    step="1"
+                    value={customEq.mid}
+                    onChange={(e) => {
+                      onSoundProfileChange('custom');
+                      onCustomEqChange({ ...customEq, mid: parseFloat(e.target.value) });
+                    }}
+                    className="w-full accent-[#4da8ab] cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[9px] text-slate-400 font-mono">
+                    <span>-12 dB</span>
+                    <span>0 dB</span>
+                    <span>+18 dB (فائق الوضوح)</span>
+                  </div>
+                </div>
+
+                {/* Treble slider */}
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-bold text-slate-700 dark:text-slate-200">نقاء الترددات العالية (Treble 8kHz):</span>
+                    <span className="font-mono text-[#4da8ab] font-bold">
+                      {customEq.treble > 0 ? `+${customEq.treble}` : customEq.treble} dB
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-12"
+                    max="18"
+                    step="1"
+                    value={customEq.treble}
+                    onChange={(e) => {
+                      onSoundProfileChange('custom');
+                      onCustomEqChange({ ...customEq, treble: parseFloat(e.target.value) });
+                    }}
+                    className="w-full accent-[#4da8ab] cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[9px] text-slate-400 font-mono">
+                    <span>-12 dB</span>
+                    <span>0 dB</span>
+                    <span>+18 dB (نقاء بلوري)</span>
+                  </div>
+                </div>
+
+                {/* Gain boost slider */}
+                <div className="space-y-1.5 pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-bold text-slate-700 dark:text-slate-200">مضخم الطاقة الرئيسي (Master Amplification):</span>
+                    <span className="font-mono text-amber-500 font-bold text-sm">
+                      {Math.round(customEq.gain * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.8"
+                    max="2.0"
+                    step="0.05"
+                    value={customEq.gain}
+                    onChange={(e) => {
+                      onSoundProfileChange('custom');
+                      onCustomEqChange({ ...customEq, gain: parseFloat(e.target.value) });
+                    }}
+                    className="w-full accent-amber-500 cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[9px] text-slate-400 font-mono">
+                    <span>80%</span>
+                    <span>100% (طبيعي)</span>
+                    <span>200% (مضاعف)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* تبويب 3: تخصيص السماعات (يمين / يسار بشكل منفصل) */}
           {activeTab === 'gestures' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
                     <Radio className="w-3.5 h-3.5 text-[#4da8ab]" />
-                    <span>تخصيص وظائف إيماءات اللمس وأزرار السماعات</span>
+                    <span>تخصيص السماعة اليمنى واليسرى بشكل منفصل</span>
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    حدد ماذا ينفذ كل أمر على سماعات البلوتوث وسماعات اللمس (TWS Earbuds)
+                    خصص أوامر اللمس لسماعة الأذن اليمين واليسار (TWS Earbuds)
                   </p>
                 </div>
                 <button
@@ -574,6 +642,38 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                 </div>
               )}
 
+              {/* أزرار اختيار السماعة: يمين / يسار */}
+              <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100 dark:bg-slate-800/80 rounded-2xl">
+                <button
+                  onClick={() => setActiveEarbudSide('right')}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                    activeEarbudSide === 'right'
+                      ? 'bg-white dark:bg-slate-900 text-[#4da8ab] shadow-md ring-1 ring-[#4da8ab]/30'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  <span className="w-5 h-5 rounded-full bg-[#4da8ab]/15 text-[#4da8ab] flex items-center justify-center font-bold text-[10px]">
+                    R
+                  </span>
+                  <span>السماعة اليمنى (Right)</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveEarbudSide('left')}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                    activeEarbudSide === 'left'
+                      ? 'bg-white dark:bg-slate-900 text-[#4da8ab] shadow-md ring-1 ring-[#4da8ab]/30'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  <span className="w-5 h-5 rounded-full bg-[#4da8ab]/15 text-[#4da8ab] flex items-center justify-center font-bold text-[10px]">
+                    L
+                  </span>
+                  <span>السماعة اليسرى (Left)</span>
+                </button>
+              </div>
+
+              {/* بطاقات أوامر السماعة المحددة */}
               <div className="space-y-2.5 text-xs">
                 {/* 1. لمسة واحدة / Single Tap */}
                 <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 space-y-2">
@@ -583,20 +683,22 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                         1×
                       </span>
                       <div>
-                        <p className="font-bold text-slate-800 dark:text-slate-100">لمسة واحدة (Single Tap / Click)</p>
-                        <p className="text-[10px] text-slate-400">الضغطة الفردية على حساس اللمس أو الزر الرئيسي</p>
+                        <p className="font-bold text-slate-800 dark:text-slate-100">
+                          لمسة واحدة ({activeEarbudSide === 'right' ? 'السماعة اليمنى R' : 'السماعة اليسرى L'})
+                        </p>
+                        <p className="text-[10px] text-slate-400">Single Tap</p>
                       </div>
                     </div>
                     <button
-                      onClick={() => handleTestGesture(gestureSettings.singleTap)}
+                      onClick={() => handleTestGesture(currentEarbudConfig.singleTap)}
                       className="text-[10px] px-2 py-1 bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg border border-slate-200 dark:border-slate-600 hover:text-[#4da8ab] active:scale-95 font-semibold"
                     >
                       تجربة
                     </button>
                   </div>
                   <select
-                    value={gestureSettings.singleTap}
-                    onChange={(e) => handleUpdateGesture('singleTap', e.target.value as HeadphoneActionType)}
+                    value={currentEarbudConfig.singleTap}
+                    onChange={(e) => handleUpdateEarbudAction(activeEarbudSide, 'singleTap', e.target.value as HeadphoneActionType)}
                     className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:border-[#4da8ab]"
                   >
                     {Object.entries(ACTION_LABELS).map(([actionKey, actionData]) => (
@@ -615,20 +717,22 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                         2×
                       </span>
                       <div>
-                        <p className="font-bold text-slate-800 dark:text-slate-100">لمستان متتاليتان (Double Tap)</p>
-                        <p className="text-[10px] text-slate-400">الضغط المزدوج السريع على السماعة</p>
+                        <p className="font-bold text-slate-800 dark:text-slate-100">
+                          لمستان متتاليتان ({activeEarbudSide === 'right' ? 'السماعة اليمنى R' : 'السماعة اليسرى L'})
+                        </p>
+                        <p className="text-[10px] text-slate-400">Double Tap</p>
                       </div>
                     </div>
                     <button
-                      onClick={() => handleTestGesture(gestureSettings.doubleTap)}
+                      onClick={() => handleTestGesture(currentEarbudConfig.doubleTap)}
                       className="text-[10px] px-2 py-1 bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg border border-slate-200 dark:border-slate-600 hover:text-[#4da8ab] active:scale-95 font-semibold"
                     >
                       تجربة
                     </button>
                   </div>
                   <select
-                    value={gestureSettings.doubleTap}
-                    onChange={(e) => handleUpdateGesture('doubleTap', e.target.value as HeadphoneActionType)}
+                    value={currentEarbudConfig.doubleTap}
+                    onChange={(e) => handleUpdateEarbudAction(activeEarbudSide, 'doubleTap', e.target.value as HeadphoneActionType)}
                     className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:border-[#4da8ab]"
                   >
                     {Object.entries(ACTION_LABELS).map(([actionKey, actionData]) => (
@@ -647,20 +751,22 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                         3×
                       </span>
                       <div>
-                        <p className="font-bold text-slate-800 dark:text-slate-100">3 لمسات متتالية (Triple Tap)</p>
-                        <p className="text-[10px] text-slate-400">الضغط الثلاثي المتتالي على السماعة</p>
+                        <p className="font-bold text-slate-800 dark:text-slate-100">
+                          3 لمسات متتالية ({activeEarbudSide === 'right' ? 'السماعة اليمنى R' : 'السماعة اليسرى L'})
+                        </p>
+                        <p className="text-[10px] text-slate-400">Triple Tap</p>
                       </div>
                     </div>
                     <button
-                      onClick={() => handleTestGesture(gestureSettings.tripleTap)}
+                      onClick={() => handleTestGesture(currentEarbudConfig.tripleTap)}
                       className="text-[10px] px-2 py-1 bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg border border-slate-200 dark:border-slate-600 hover:text-[#4da8ab] active:scale-95 font-semibold"
                     >
                       تجربة
                     </button>
                   </div>
                   <select
-                    value={gestureSettings.tripleTap}
-                    onChange={(e) => handleUpdateGesture('tripleTap', e.target.value as HeadphoneActionType)}
+                    value={currentEarbudConfig.tripleTap}
+                    onChange={(e) => handleUpdateEarbudAction(activeEarbudSide, 'tripleTap', e.target.value as HeadphoneActionType)}
                     className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:border-[#4da8ab]"
                   >
                     {Object.entries(ACTION_LABELS).map(([actionKey, actionData]) => (
@@ -671,22 +777,30 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                   </select>
                 </div>
 
-                {/* 4. زر التالي في أجهزة البلوتوث / Next Button */}
+                {/* 4. لمسة مطولة / Long Press */}
                 <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 flex items-center justify-center">
-                        <SkipForward className="w-3.5 h-3.5" />
-                      </div>
+                      <span className="w-7 h-7 rounded-xl bg-amber-500/15 text-amber-600 flex items-center justify-center font-bold text-xs">
+                        ⏱️
+                      </span>
                       <div>
-                        <p className="font-bold text-slate-800 dark:text-slate-100">زر التالي (Next Key / Fast-Forward)</p>
-                        <p className="text-[10px] text-slate-400">الزر المخصص للتالي في سماعات الرأس والسيارات</p>
+                        <p className="font-bold text-slate-800 dark:text-slate-100">
+                          لمسة مطولة ({activeEarbudSide === 'right' ? 'السماعة اليمنى R' : 'السماعة اليسرى L'})
+                        </p>
+                        <p className="text-[10px] text-slate-400">Long Press / Hold</p>
                       </div>
                     </div>
+                    <button
+                      onClick={() => handleTestGesture(currentEarbudConfig.longPress)}
+                      className="text-[10px] px-2 py-1 bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg border border-slate-200 dark:border-slate-600 hover:text-[#4da8ab] active:scale-95 font-semibold"
+                    >
+                      تجربة
+                    </button>
                   </div>
                   <select
-                    value={gestureSettings.nextButton}
-                    onChange={(e) => handleUpdateGesture('nextButton', e.target.value as HeadphoneActionType)}
+                    value={currentEarbudConfig.longPress}
+                    onChange={(e) => handleUpdateEarbudAction(activeEarbudSide, 'longPress', e.target.value as HeadphoneActionType)}
                     className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:border-[#4da8ab]"
                   >
                     {Object.entries(ACTION_LABELS).map(([actionKey, actionData]) => (
@@ -697,30 +811,36 @@ export const HeadphoneControlsModal: React.FC<HeadphoneControlsModalProps> = ({
                   </select>
                 </div>
 
-                {/* 5. زر السابق في أجهزة البلوتوث / Prev Button */}
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 flex items-center justify-center">
-                        <SkipBack className="w-3.5 h-3.5" />
-                      </div>
-                      <div>
-                        <p className="font-bold text-slate-800 dark:text-slate-100">زر السابق (Previous Key / Rewind)</p>
-                        <p className="text-[10px] text-slate-400">الزر المخصص للرجوع في سماعات الرأس والسيارات</p>
-                      </div>
+                {/* أزرار الهاردوير الخارجية (Next / Prev Key) */}
+                <div className="pt-2">
+                  <h4 className="text-[11px] font-bold text-slate-500 mb-2">أزرار البلوتوث الخارجية وسماعات الرأس:</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">زر التالي (Next Key):</span>
+                      <select
+                        value={currentSettings.nextButton}
+                        onChange={(e) => handleUpdateHardwareButton('nextButton', e.target.value as HeadphoneActionType)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-1.5 text-xs text-slate-700 dark:text-slate-200 font-bold"
+                      >
+                        {Object.entries(ACTION_LABELS).map(([k, v]) => (
+                          <option key={k} value={k}>{v.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">زر السابق (Previous Key):</span>
+                      <select
+                        value={currentSettings.prevButton}
+                        onChange={(e) => handleUpdateHardwareButton('prevButton', e.target.value as HeadphoneActionType)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-1.5 text-xs text-slate-700 dark:text-slate-200 font-bold"
+                      >
+                        {Object.entries(ACTION_LABELS).map(([k, v]) => (
+                          <option key={k} value={k}>{v.label}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
-                  <select
-                    value={gestureSettings.prevButton}
-                    onChange={(e) => handleUpdateGesture('prevButton', e.target.value as HeadphoneActionType)}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 font-bold focus:outline-none focus:border-[#4da8ab]"
-                  >
-                    {Object.entries(ACTION_LABELS).map(([actionKey, actionData]) => (
-                      <option key={actionKey} value={actionKey}>
-                        {actionData.label} - ({actionData.desc})
-                      </option>
-                    ))}
-                  </select>
                 </div>
               </div>
             </div>

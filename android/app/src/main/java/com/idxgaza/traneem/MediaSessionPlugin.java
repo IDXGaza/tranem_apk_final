@@ -416,8 +416,17 @@ public class MediaSessionPlugin extends Plugin {
             try {
                 String base64Data = artworkUrl.substring(artworkUrl.indexOf("base64,") + 7);
                 byte[] decodedBytes = Base64.decode(base64Data, Base64.DEFAULT);
-                instantBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
-                if (instantBitmap != null) {
+                Bitmap decoded = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
+                if (decoded != null) {
+                    int maxDim = Math.max(decoded.getWidth(), decoded.getHeight());
+                    if (maxDim > 512) {
+                        float scale = 512f / maxDim;
+                        int targetW = Math.round(decoded.getWidth() * scale);
+                        int targetH = Math.round(decoded.getHeight() * scale);
+                        instantBitmap = Bitmap.createScaledBitmap(decoded, targetW, targetH, true);
+                    } else {
+                        instantBitmap = decoded;
+                    }
                     lastBitmap = instantBitmap;
                 }
             } catch (Exception ignored) {
@@ -440,6 +449,7 @@ public class MediaSessionPlugin extends Plugin {
                     if (targetBitmap != null) {
                         immediateBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, targetBitmap);
                         immediateBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, targetBitmap);
+                        immediateBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, targetBitmap);
                     }
                     mediaSession.setMetadata(immediateBuilder.build());
                 }

@@ -1269,20 +1269,25 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
 
     if (blob) {
-      return new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const dataUrl = reader.result as string;
-          if (dataUrl) {
-            coverDataUrlCacheRef.current.set(track.id, dataUrl);
-            resolve(dataUrl);
-          } else {
-            resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
-          }
-        };
-        reader.onerror = () => resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
-        reader.readAsDataURL(blob);
-      });
+      try {
+        const compressedBlob = await compressImageBlob(blob, 320, 0.8);
+        return new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            if (dataUrl) {
+              coverDataUrlCacheRef.current.set(track.id, dataUrl);
+              resolve(dataUrl);
+            } else {
+              resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
+            }
+          };
+          reader.onerror = () => resolve(track.coverUrl || UNIFORM_PLACEHOLDER);
+          reader.readAsDataURL(compressedBlob);
+        });
+      } catch (err) {
+        return track.coverUrl || UNIFORM_PLACEHOLDER;
+      }
     }
 
     if (track.coverUrl && (track.coverUrl.startsWith('http://') || track.coverUrl.startsWith('https://'))) {
@@ -2220,15 +2225,16 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
-      {/* خلفية صورة الأنشودة الحالية الضبابية الفائقة (Ambient Artwork Backdrop) */}
+      {/* خلفية صورة الأنشودة الحالية الضبابية الخفيفة المحسنة للأداء */}
       {currentTrack?.coverUrl && !isRecording && (
-        <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden select-none transition-all duration-1000">
+        <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden select-none transition-opacity duration-700">
           <img
             src={currentTrack.coverUrl}
             alt=""
-            className="w-full h-full object-cover scale-150 blur-[90px] md:blur-[120px] opacity-25 dark:opacity-30 saturate-150 transform transition-all duration-1000"
+            loading="lazy"
+            className="w-full h-full object-cover scale-110 blur-2xl md:blur-3xl opacity-20 dark:opacity-25 saturate-125 transform-gpu will-change-transform"
           />
-          <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-white/40 to-white/75 dark:from-slate-950/70 dark:via-slate-950/50 dark:to-slate-950/85 backdrop-blur-[2px] transition-colors duration-500" />
+          <div className="absolute inset-0 bg-slate-50/75 dark:bg-slate-950/80 transition-colors duration-500" />
         </div>
       )}
 

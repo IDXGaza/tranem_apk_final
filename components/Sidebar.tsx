@@ -387,19 +387,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                </button>
              ))}
           </div>
-
-          {onRestoreSafetyVault && (
-            <button
-              onClick={() => {
-                onRestoreSafetyVault();
-                if (onClose) onClose();
-              }}
-              className="w-full py-2 px-3 bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-bold rounded-xl border border-emerald-500/20 text-[11px] flex items-center justify-center gap-1.5 transition-all active:scale-95"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span>استرجاع الأناشيد من مستودع الأمان</span>
-            </button>
-          )}
         </div>
 
         <nav ref={navRef} className="flex-1 min-h-0 overflow-y-auto px-5 pb-36 space-y-4 pt-4 custom-scrollbar overscroll-contain">
