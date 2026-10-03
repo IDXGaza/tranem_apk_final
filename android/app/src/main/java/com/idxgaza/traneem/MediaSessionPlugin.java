@@ -15,9 +15,12 @@ import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -48,6 +51,7 @@ public class MediaSessionPlugin extends Plugin {
     private final String CHANNEL_ID = "traneem_media";
     private final int NOTIFICATION_ID = 1;
     private AudioFocusRequest audioFocusRequest = null;
+    private PowerManager.WakeLock wakeLock = null;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -117,10 +121,11 @@ public class MediaSessionPlugin extends Plugin {
                 KeyEvent keyEvent = mediaButtonEvent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
                 if (keyEvent == null) return super.onMediaButtonEvent(mediaButtonEvent);
 
-                long now = System.currentTimeMillis();
-                boolean isRepeat = (now - lastEventTime < 70) && (lastKeyCode == keyEvent.getKeyCode());
-
                 if (keyEvent.getAction() == KeyEvent.ACTION_DOWN) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastEventTime < 70 && lastKeyCode == keyEvent.getKeyCode()) {
+                        return true;
+                    }
                     lastEventTime = now;
                     lastKeyCode = keyEvent.getKeyCode();
 
@@ -132,7 +137,7 @@ public class MediaSessionPlugin extends Plugin {
                             if (headsetClickCount >= 3) {
                                 headsetRunnable.run();
                             } else {
-                                headsetHandler.postDelayed(headsetRunnable, 380);
+                                headsetHandler.postDelayed(headsetRunnable, 220);
                             }
                             return true;
 
@@ -182,50 +187,18 @@ public class MediaSessionPlugin extends Plugin {
                             return true;
                         }
                     }
-                } else if (keyEvent.getAction() == KeyEvent.ACTION_UP && !isRepeat) {
-                    if (now - lastEventTime > 150) {
-                        switch (keyEvent.getKeyCode()) {
-                            case KeyEvent.KEYCODE_HEADSETHOOK:
-                            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                                headsetHandler.removeCallbacks(headsetRunnable);
-                                headsetClickCount++;
-                                if (headsetClickCount >= 3) {
-                                    headsetRunnable.run();
-                                } else {
-                                    headsetHandler.postDelayed(headsetRunnable, 380);
-                                }
-                                return true;
-
-                            case KeyEvent.KEYCODE_MEDIA_PLAY: {
-                                JSObject obj = new JSObject();
-                                obj.put("action", "play");
-                                notifyListeners("mediaAction", obj);
-                                return true;
-                            }
-
-                            case KeyEvent.KEYCODE_MEDIA_PAUSE: {
-                                JSObject obj = new JSObject();
-                                obj.put("action", "pause");
-                                notifyListeners("mediaAction", obj);
-                                return true;
-                            }
-
-                            case KeyEvent.KEYCODE_MEDIA_NEXT:
-                            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD: {
-                                JSObject obj = new JSObject();
-                                obj.put("action", "next");
-                                notifyListeners("mediaAction", obj);
-                                return true;
-                            }
-
-                            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
-                            case KeyEvent.KEYCODE_MEDIA_REWIND: {
-                                JSObject obj = new JSObject();
-                                obj.put("action", "previous");
-                                notifyListeners("mediaAction", obj);
-                                return true;
-                            }
-                        }
+                } else if (keyEvent.getAction() == KeyEvent.ACTION_UP) {
+                    switch (keyEvent.getKeyCode()) {
+                        case KeyEvent.KEYCODE_HEADSETHOOK:
+                        case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                        case KeyEvent.KEYCODE_MEDIA_PLAY:
+                        case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                        case KeyEvent.KEYCODE_MEDIA_NEXT:
+                        case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                        case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+                        case KeyEvent.KEYCODE_MEDIA_REWIND:
+                        case KeyEvent.KEYCODE_MEDIA_STOP:
+                            return true;
                     }
                 }
                 return super.onMediaButtonEvent(mediaButtonEvent);
@@ -392,8 +365,10 @@ public class MediaSessionPlugin extends Plugin {
 
     private String lastTitle = "ترانيم";
     private String lastArtist = "";
+    private String lastArtworkUrl = "";
     private Bitmap lastBitmap = null;
     private boolean lastIsPlaying = false;
+    private long artworkRequestId = 0L;
 
     @PluginMethod
     public void updateMetadata(PluginCall call) {
@@ -404,15 +379,21 @@ public class MediaSessionPlugin extends Plugin {
         final double duration = call.getDouble("duration", 0.0);
         final double position = call.getDouble("position", 0.0);
 
+        final long currentReqId = ++artworkRequestId;
+
         lastTitle = title;
         lastArtist = artist;
         lastIsPlaying = isPlaying;
 
         final long durationMs = (long) (duration * 1000);
 
-        // Immediate check: If artwork is base64 data, decode it instantly on the spot
-        Bitmap instantBitmap = lastBitmap;
-        if (artworkUrl != null && artworkUrl.startsWith("data:image")) {
+        Bitmap instantBitmap = null;
+        if (artworkUrl == null || artworkUrl.trim().isEmpty()) {
+            lastBitmap = null;
+            lastArtworkUrl = "";
+        } else if (artworkUrl.equals(lastArtworkUrl) && lastBitmap != null) {
+            instantBitmap = lastBitmap;
+        } else if (artworkUrl.startsWith("data:image")) {
             try {
                 String base64Data = artworkUrl.substring(artworkUrl.indexOf("base64,") + 7);
                 byte[] decodedBytes = Base64.decode(base64Data, Base64.DEFAULT);
@@ -421,27 +402,34 @@ public class MediaSessionPlugin extends Plugin {
                     int maxDim = Math.max(decoded.getWidth(), decoded.getHeight());
                     if (maxDim > 512) {
                         float scale = 512f / maxDim;
-                        int targetW = Math.round(decoded.getWidth() * scale);
-                        int targetH = Math.round(decoded.getHeight() * scale);
+                        int targetW = Math.max(1, Math.round(decoded.getWidth() * scale));
+                        int targetH = Math.max(1, Math.round(decoded.getHeight() * scale));
                         instantBitmap = Bitmap.createScaledBitmap(decoded, targetW, targetH, true);
                     } else {
                         instantBitmap = decoded;
                     }
                     lastBitmap = instantBitmap;
+                    lastArtworkUrl = artworkUrl;
                 }
             } catch (Exception ignored) {
+                instantBitmap = null;
             }
         }
+
         final Bitmap targetBitmap = instantBitmap;
 
-        // Immediate 0ms UI update with target cover bitmap
+        // Immediate UI update with target cover bitmap
         getActivity().runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                if (currentReqId != artworkRequestId) return;
+
                 if (mediaSession != null) {
+                    mediaSession.setActive(true);
                     MediaMetadataCompat.Builder immediateBuilder = new MediaMetadataCompat.Builder()
                         .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
+                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist != null && !artist.isEmpty() ? artist : "ترانيم")
+                        .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "ترانيم");
 
                     if (durationMs > 0) {
                         immediateBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
@@ -459,7 +447,7 @@ public class MediaSessionPlugin extends Plugin {
         });
 
         // Background asynchronous artwork fetching only for remote HTTP/HTTPS URLs
-        if (artworkUrl != null && (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://"))) {
+        if (targetBitmap == null && artworkUrl != null && (artworkUrl.startsWith("http://") || artworkUrl.startsWith("https://"))) {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -469,26 +457,43 @@ public class MediaSessionPlugin extends Plugin {
                         connection.setConnectTimeout(2500);
                         connection.setReadTimeout(3000);
                         InputStream input = connection.getInputStream();
-                        bitmap = BitmapFactory.decodeStream(input);
+                        Bitmap decoded = BitmapFactory.decodeStream(input);
+                        if (decoded != null) {
+                            int maxDim = Math.max(decoded.getWidth(), decoded.getHeight());
+                            if (maxDim > 512) {
+                                float scale = 512f / maxDim;
+                                int targetW = Math.max(1, Math.round(decoded.getWidth() * scale));
+                                int targetH = Math.max(1, Math.round(decoded.getHeight() * scale));
+                                bitmap = Bitmap.createScaledBitmap(decoded, targetW, targetH, true);
+                            } else {
+                                bitmap = decoded;
+                            }
+                        }
                     } catch (Exception ignored) {
                     }
 
                     if (bitmap != null) {
-                        lastBitmap = bitmap;
                         final Bitmap finalBitmap = bitmap;
                         getActivity().runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
+                                if (currentReqId != artworkRequestId) return;
+                                lastBitmap = finalBitmap;
+                                lastArtworkUrl = artworkUrl;
+
                                 if (mediaSession != null) {
+                                    mediaSession.setActive(true);
                                     MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder()
                                         .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist);
+                                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist != null && !artist.isEmpty() ? artist : "ترانيم")
+                                        .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "ترانيم");
 
                                     if (durationMs > 0) {
                                         metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
                                     }
                                     metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, finalBitmap);
                                     metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, finalBitmap);
+                                    metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, finalBitmap);
 
                                     mediaSession.setMetadata(metadataBuilder.build());
                                 }
@@ -532,6 +537,27 @@ public class MediaSessionPlugin extends Plugin {
             .setState(state, positionMs >= 0 ? positionMs : PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f);
 
         mediaSession.setPlaybackState(playbackState.build());
+
+        // Background playback guard via Partial WakeLock
+        try {
+            if (isPlaying) {
+                if (wakeLock == null) {
+                    PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+                    if (pm != null) {
+                        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "traneem:playback_wake_lock");
+                        wakeLock.setReferenceCounted(false);
+                    }
+                }
+                if (wakeLock != null && !wakeLock.isHeld()) {
+                    wakeLock.acquire(12 * 60 * 60 * 1000L); // 12 hours safety timeout
+                }
+            } else {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void showNotification(String title, String artist, Bitmap artwork, boolean isPlaying) {
@@ -666,10 +692,58 @@ public class MediaSessionPlugin extends Plugin {
         call.resolve(res);
     }
 
+    @PluginMethod
+    public void isIgnoringBatteryOptimizations(PluginCall call) {
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        boolean ignoring = false;
+        if (pm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            ignoring = pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+        }
+        JSObject res = new JSObject();
+        res.put("isIgnoring", ignoring);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void requestIgnoreBatteryOptimizations(PluginCall call) {
+        boolean requested = false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getContext().getPackageName())) {
+                try {
+                    Intent intent = new Intent();
+                    intent.setAction(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+                    getActivity().startActivity(intent);
+                    requested = true;
+                } catch (Exception e) {
+                    try {
+                        Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                        fallback.setData(Uri.parse("package:" + getContext().getPackageName()));
+                        getActivity().startActivity(fallback);
+                        requested = true;
+                    } catch (Exception ignored) {
+                    }
+                }
+            } else {
+                requested = true;
+            }
+        }
+        JSObject res = new JSObject();
+        res.put("requested", requested);
+        call.resolve(res);
+    }
+
     @Override
     public void handleOnDestroy() {
         if (activePlugin == this) activePlugin = null;
         if (activeSession == mediaSession) activeSession = null;
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Exception ignored) {
+        }
         try {
             getContext().unregisterReceiver(receiver);
         } catch (Exception ignored) {

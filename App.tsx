@@ -1229,18 +1229,71 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     return granted;
   }, []);
 
-  const triggerNotificationPermissionIfNeeded = useCallback(async () => {
-    if (hasNotificationPermission) return;
-    if (localStorage.getItem('traneem_notification_requested') === 'true') return;
-    localStorage.setItem('traneem_notification_requested', 'true');
-    await requestPlaybackNotificationPermission();
+  const [isBackgroundOptimized, setIsBackgroundOptimized] = useState<boolean>(false);
+  const wakeLockRef = useRef<any>(null);
+
+  const checkBackgroundPermissionStatus = useCallback(async () => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const res = await (MediaSession as any).isIgnoringBatteryOptimizations();
+        if (res && typeof res.isIgnoring === 'boolean') {
+          setIsBackgroundOptimized(res.isIgnoring);
+        }
+      } catch (e) {
+        console.warn('Check battery optimization error:', e);
+      }
+    } else {
+      if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+        setIsBackgroundOptimized(true);
+      }
+    }
+  }, []);
+
+  const requestBackgroundPlaybackPermission = useCallback(async () => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await (MediaSession as any).requestIgnoreBatteryOptimizations();
+        setTimeout(async () => {
+          await checkBackgroundPermissionStatus();
+        }, 1500);
+      } catch (e) {
+        console.warn('Request battery optimization error:', e);
+      }
+    } else if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+      try {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        setIsBackgroundOptimized(true);
+      } catch (e) {}
+    }
+  }, [checkBackgroundPermissionStatus]);
+
+  const triggerBackgroundAndNotificationPermissionIfNeeded = useCallback(async () => {
+    if (!hasNotificationPermission) {
+      if (localStorage.getItem('traneem_notification_requested') !== 'true') {
+        localStorage.setItem('traneem_notification_requested', 'true');
+        await requestPlaybackNotificationPermission();
+      }
+    }
+    if (Capacitor.isNativePlatform()) {
+      if (localStorage.getItem('traneem_battery_requested') !== 'true') {
+        localStorage.setItem('traneem_battery_requested', 'true');
+        try {
+          const res = await (MediaSession as any).isIgnoringBatteryOptimizations();
+          if (res && !res.isIgnoring) {
+            await (MediaSession as any).requestIgnoreBatteryOptimizations();
+          }
+        } catch (e) {}
+      }
+    }
   }, [hasNotificationPermission, requestPlaybackNotificationPermission]);
 
   useEffect(() => {
     checkNotificationPermissionStatus();
-  }, [checkNotificationPermissionStatus]);
+    checkBackgroundPermissionStatus();
+  }, [checkNotificationPermissionStatus, checkBackgroundPermissionStatus]);
 
   const coverDataUrlCacheRef = useRef<Map<string, string>>(new Map());
+  const lastNativeTrackIdRef = useRef<string | null>(null);
 
   const getTrackCoverArtwork = useCallback(async (track: Track): Promise<string> => {
     if (!track) return UNIFORM_PLACEHOLDER;
@@ -1348,16 +1401,25 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     // Native Capacitor Android MediaSession
     if (Capacitor.isNativePlatform()) {
       try {
-        const customArtwork = await getTrackCoverArtwork(track);
+        const isSameTrack = lastNativeTrackIdRef.current === track.id && !explicitTrack;
+        if (isSameTrack) {
+          await MediaSession.updatePlaybackState({
+            isPlaying,
+            position
+          });
+        } else {
+          lastNativeTrackIdRef.current = track.id;
+          const customArtwork = await getTrackCoverArtwork(track);
 
-        await MediaSession.updateMetadata({
-          title: track.name,
-          artist: track.artist || 'ترانيم',
-          artworkUrl: customArtwork,
-          isPlaying,
-          duration,
-          position
-        });
+          await MediaSession.updateMetadata({
+            title: track.name,
+            artist: track.artist || 'ترانيم',
+            artworkUrl: customArtwork,
+            isPlaying,
+            duration,
+            position
+          });
+        }
       } catch (e) {
         console.warn('Native MediaSession error:', e);
       }
@@ -1424,7 +1486,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [initAudioCtx, updateMediaSession]);
 
   const handleSelectTrack = useCallback(async (index: number) => {
-    triggerNotificationPermissionIfNeeded();
+    triggerBackgroundAndNotificationPermissionIfNeeded();
     const track = tracks[index];
     if (!track) return;
     
@@ -1472,7 +1534,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         console.warn("Manual audio sync failed", e);
       }
     }
-  }, [tracks, initAudioCtx, updateMediaSession, triggerNotificationPermissionIfNeeded]);
+  }, [tracks, initAudioCtx, updateMediaSession, triggerBackgroundAndNotificationPermissionIfNeeded]);
 
   const handleShuffle = useCallback(() => {
     if (tracks.length < 2) return;
@@ -1523,7 +1585,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [tracks, handleSelectTrack]);
 
   const handlePlayPause = async () => {
-    triggerNotificationPermissionIfNeeded();
+    triggerBackgroundAndNotificationPermissionIfNeeded();
     const audio = audioRef.current;
     if (!audio) return;
     initAudioCtx();
@@ -1571,13 +1633,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const executeHeadphoneAction = useCallback((actionType: HeadphoneActionType) => {
     switch (actionType) {
       case 'toggle': {
-        const audio = audioRef.current;
-        const actuallyPlaying = audio && !audio.paused && !audio.ended && audio.readyState > 2;
-        if (actuallyPlaying) {
-          handlePause();
-        } else {
-          handlePlay();
-        }
+        handlePlayPause();
         break;
       }
       case 'next':
@@ -2284,6 +2340,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             onShareApp={handleShare}
             storagePersisted={storagePersisted}
             onRestoreSafetyVault={handleRestoreFromSafetyVault}
+            isBackgroundOptimized={isBackgroundOptimized}
+            onRequestBackgroundPermission={requestBackgroundPlaybackPermission}
           />
         </div>
       </header>
@@ -2308,7 +2366,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               }}
               onEditTrack={handleOpenEditModal}
               isLoading={isInitialLoading}
-              onRestoreSafetyVault={handleRestoreFromSafetyVault}
               className="fixed inset-y-0 right-0 h-full w-[85%] sm:w-[400px] shadow-2xl z-[200] lg:!relative lg:!w-full lg:!shadow-none lg:!z-10 lg:!inset-auto"
             />
           </div>

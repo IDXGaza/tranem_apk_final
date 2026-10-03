@@ -13,8 +13,7 @@ import {
   X, 
   Shuffle, 
   AlertCircle,
-  GripVertical,
-  ShieldCheck
+  GripVertical
 } from 'lucide-react';
 import { Track } from '../types';
 import { normalizeArabic } from '../utils/arabicNormalization';
@@ -41,7 +40,6 @@ interface SidebarProps {
   onOpenBackup?: () => void;
   onEditTrack?: (track: Track) => void;
   isLoading?: boolean;
-  onRestoreSafetyVault?: () => void;
 }
 
 const DropPlaceholder = () => (
@@ -55,7 +53,7 @@ const DropPlaceholder = () => (
 
 const Sidebar: React.FC<SidebarProps> = ({ 
   onImport, onRemove, onMove, onReorderEnd, onToggleSourceType, defaultView, setDefaultView, tracks, currentId, onSelect, onPlayRandom, isOpen = false, onClose,
-  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className, onRestoreSafetyVault
+  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState<'all' | 'record' | 'import'>(defaultView);
