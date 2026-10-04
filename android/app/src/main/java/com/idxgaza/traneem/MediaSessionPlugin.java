@@ -58,6 +58,9 @@ public class MediaSessionPlugin extends Plugin {
         public void onReceive(Context context, Intent intent) {
             if (intent == null || intent.getAction() == null) return;
             String action = intent.getAction();
+            requestAudioFocusInternal();
+            if (mediaSession != null) mediaSession.setActive(true);
+
             if ("com.idxgaza.traneem.MEDIA_PREVIOUS".equals(action)) {
                 JSObject obj = new JSObject();
                 obj.put("action", "previous");
@@ -206,6 +209,8 @@ public class MediaSessionPlugin extends Plugin {
 
             @Override
             public void onPlay() {
+                requestAudioFocusInternal();
+                if (mediaSession != null) mediaSession.setActive(true);
                 JSObject obj = new JSObject();
                 obj.put("action", "play");
                 notifyListeners("mediaAction", obj);
@@ -508,11 +513,93 @@ public class MediaSessionPlugin extends Plugin {
         call.resolve();
     }
 
+    private void requestAudioFocusInternal() {
+        try {
+            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (audioFocusRequest == null) {
+                    AudioAttributes playbackAttributes = new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build();
+                    audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(playbackAttributes)
+                        .setAcceptsDelayedFocusGain(true)
+                        .setOnAudioFocusChangeListener(new AudioManager.OnAudioFocusChangeListener() {
+                            @Override
+                            public void onAudioFocusChange(int focusChange) {
+                                if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                                    JSObject obj = new JSObject();
+                                    obj.put("action", "pause");
+                                    notifyListeners("mediaAction", obj);
+                                }
+                            }
+                        })
+                        .build();
+                }
+                am.requestAudioFocus(audioFocusRequest);
+            } else {
+                @SuppressWarnings("deprecation")
+                int res = am.requestAudioFocus(
+                    new AudioManager.OnAudioFocusChangeListener() {
+                        @Override
+                        public void onAudioFocusChange(int focusChange) {
+                            if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                                JSObject obj = new JSObject();
+                                obj.put("action", "pause");
+                                notifyListeners("mediaAction", obj);
+                            }
+                        }
+                    },
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                );
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void abandonAudioFocusInternal() {
+        try {
+            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (audioFocusRequest != null) {
+                    am.abandonAudioFocusRequest(audioFocusRequest);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     @PluginMethod
     public void updatePlaybackState(PluginCall call) {
         boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
         double position = call.getDouble("position", 0.0);
+        double duration = call.getDouble("duration", 0.0);
         lastIsPlaying = isPlaying;
+
+        if (duration > 0 && mediaSession != null) {
+            long durationMs = (long) (duration * 1000);
+            MediaMetadataCompat currentMeta = mediaSession.getController().getMetadata();
+            long existingDuration = currentMeta != null ? currentMeta.getLong(MediaMetadataCompat.METADATA_KEY_DURATION) : 0;
+            if (Math.abs(existingDuration - durationMs) > 300) {
+                MediaMetadataCompat.Builder builder;
+                if (currentMeta != null) {
+                    builder = new MediaMetadataCompat.Builder(currentMeta);
+                } else {
+                    builder = new MediaMetadataCompat.Builder();
+                    builder.putString(MediaMetadataCompat.METADATA_KEY_TITLE, lastTitle);
+                    builder.putString(MediaMetadataCompat.METADATA_KEY_ARTIST, lastArtist);
+                }
+                builder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+                mediaSession.setMetadata(builder.build());
+            }
+        }
+
         updatePlaybackStateInternal(isPlaying, position);
         showNotification(lastTitle, lastArtist, lastBitmap, isPlaying);
         call.resolve();
@@ -538,9 +625,10 @@ public class MediaSessionPlugin extends Plugin {
 
         mediaSession.setPlaybackState(playbackState.build());
 
-        // Background playback guard via Partial WakeLock
+        // Background playback guard via Partial WakeLock & AudioFocus
         try {
             if (isPlaying) {
+                requestAudioFocusInternal();
                 if (wakeLock == null) {
                     PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
                     if (pm != null) {
@@ -552,6 +640,7 @@ public class MediaSessionPlugin extends Plugin {
                     wakeLock.acquire(12 * 60 * 60 * 1000L); // 12 hours safety timeout
                 }
             } else {
+                abandonAudioFocusInternal();
                 if (wakeLock != null && wakeLock.isHeld()) {
                     wakeLock.release();
                 }

@@ -9,7 +9,7 @@ const MediaSession = registerPlugin<{
     duration?: number; 
     position?: number; 
   }) => Promise<void>;
-  updatePlaybackState: (opts: { isPlaying: boolean; position?: number }) => Promise<void>;
+  updatePlaybackState: (opts: { isPlaying: boolean; position?: number; duration?: number }) => Promise<void>;
   hideNotification: () => Promise<void>;
   requestNotificationPermission: () => Promise<{ granted: boolean; requested?: boolean }>;
   checkNotificationPermission: () => Promise<{ granted: boolean }>;
@@ -1405,7 +1405,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         if (isSameTrack) {
           await MediaSession.updatePlaybackState({
             isPlaying,
-            position
+            position,
+            duration
           });
         } else {
           lastNativeTrackIdRef.current = track.id;
@@ -1472,13 +1473,42 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
   }, [updateMediaSession]);
 
-  const handlePlay = useCallback(() => {
+  const handlePlay = useCallback(async () => {
     const audio = audioRef.current;
-    if (audio) {
-      initAudioCtx();
-      setPlayerState(prev => ({ ...prev, isPlaying: true }));
-      updateMediaSession(true);
-      audio.play().catch(err => {
+    if (!audio) return;
+
+    initAudioCtx();
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {}
+    }
+
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    const track = currentIdx !== null ? currentTracks[currentIdx] : null;
+
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && track) {
+      let playUrl = track.url;
+      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+          }
+        } catch (e) {}
+      }
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
+      }
+    }
+
+    setPlayerState(prev => ({ ...prev, isPlaying: true }));
+    updateMediaSession(true);
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
         console.error("Playback failed:", err);
         setPlayerState(prev => ({ ...prev, isPlaying: false }));
       });
@@ -1987,8 +2017,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
     const onLoadedMetadata = () => {
       if (audio && currentTrackIndex !== null) {
-        if (isFinite(audio.duration) && !isNaN(audio.duration)) {
-          setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: audio.duration } : t));
+        if (isFinite(audio.duration) && !isNaN(audio.duration) && audio.duration > 0) {
+          const realDuration = audio.duration;
+          setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: realDuration } : t));
+          updateMediaSession(isPlayingRef.current, realDuration, audio.currentTime);
         }
         audio.playbackRate = playerState.playbackRate;
         updateMediaSessionPosition();
