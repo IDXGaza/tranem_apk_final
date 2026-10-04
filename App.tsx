@@ -64,6 +64,31 @@ const UNIFORM_PLACEHOLDER = "https://images.unsplash.com/photo-1614613535308-eb5
 
 const deletedTrackIds = new Set<string>();
 
+const getAudioDuration = (file: File): Promise<number> => {
+  return new Promise((resolve) => {
+    try {
+      const audio = new Audio();
+      const url = URL.createObjectURL(file);
+      audio.src = url;
+      audio.onloadedmetadata = () => {
+        const dur = audio.duration;
+        URL.revokeObjectURL(url);
+        if (isFinite(dur) && !isNaN(dur) && dur > 0) {
+          resolve(dur);
+        } else {
+          resolve(0);
+        }
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+    } catch (e) {
+      resolve(0);
+    }
+  });
+};
+
 const App: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>(() => {
     try {
@@ -1488,17 +1513,22 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const currentTracks = tracksRef.current;
     const track = currentIdx !== null ? currentTracks[currentIdx] : null;
 
-    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && track) {
+    if (track) {
+      let needsLoad = !audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null;
       let playUrl = track.url;
-      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
+
+      if (needsLoad || !playUrl || playUrl === '' || playUrl.startsWith('http')) {
         try {
           const full = await getTrackFromDB(track.id);
           if (full?.fileBlob) {
             playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
+            needsLoad = true;
           }
         } catch (e) {}
       }
-      if (playUrl) {
+
+      if (needsLoad && playUrl) {
         audio.src = playUrl;
         audio.load();
       }
@@ -1506,12 +1536,29 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
     setPlayerState(prev => ({ ...prev, isPlaying: true }));
     updateMediaSession(true);
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(err => {
-        console.error("Playback failed:", err);
-        setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      });
+
+    try {
+      await audio.play();
+    } catch (err: any) {
+      console.warn("Primary play attempt failed, retriving blob from IndexedDB:", err);
+      if (track) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            const freshUrl = URL.createObjectURL(full.fileBlob);
+            audio.src = freshUrl;
+            audio.load();
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: freshUrl } : t));
+            await audio.play();
+            setPlayerState(prev => ({ ...prev, isPlaying: true }));
+            updateMediaSession(true);
+            return;
+          }
+        } catch (retryErr) {
+          console.error("Retry play failed:", retryErr);
+        }
+      }
+      setPlayerState(prev => ({ ...prev, isPlaying: false }));
     }
   }, [initAudioCtx, updateMediaSession]);
 
@@ -1618,45 +1665,11 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     triggerBackgroundAndNotificationPermissionIfNeeded();
     const audio = audioRef.current;
     if (!audio) return;
-    initAudioCtx();
 
     if (playerState.isPlaying) {
-      audio.pause();
-      setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      updateMediaSession(false);
-      return;
-    }
-
-    // Ensure audio src is loaded if not already
-    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && currentTrack) {
-      let playUrl = currentTrack.url;
-      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !currentTrack.audioUrl)) {
-        try {
-          const full = await getTrackFromDB(currentTrack.id);
-          if (full?.fileBlob) {
-            playUrl = URL.createObjectURL(full.fileBlob);
-            setTracks(prev => prev.map(t => t.id === currentTrack.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
-          }
-        } catch (e) {
-          console.warn("PlayPause get blob error:", e);
-        }
-      }
-      if (playUrl) {
-        audio.src = playUrl;
-        audio.load();
-      }
-    }
-
-    setPlayerState(prev => ({ ...prev, isPlaying: true }));
-    updateMediaSession(true);
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(error => {
-        setPlayerState(prev => ({ ...prev, isPlaying: false }));
-        if (error.name !== 'NotAllowedError') {
-          console.error(error);
-        }
-      });
+      handlePause();
+    } else {
+      await handlePlay();
     }
   };
 
@@ -2019,7 +2032,20 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       if (audio && currentTrackIndex !== null) {
         if (isFinite(audio.duration) && !isNaN(audio.duration) && audio.duration > 0) {
           const realDuration = audio.duration;
-          setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: realDuration } : t));
+          const currentTracks = tracksRef.current;
+          const activeTrack = currentTrackIndexRef.current !== null && currentTrackIndexRef.current < currentTracks.length ? currentTracks[currentTrackIndexRef.current] : null;
+          
+          if (activeTrack && (!activeTrack.duration || Math.abs(activeTrack.duration - realDuration) > 0.2)) {
+            const updatedTrack = { ...activeTrack, duration: realDuration, lastModified: new Date().toISOString() };
+            setTracks(prev => {
+              const newTracks = prev.map((t, idx) => idx === currentTrackIndex ? updatedTrack : t);
+              updateTracksMetaCache(newTracks);
+              return newTracks;
+            });
+            saveTrackToDB(updatedTrack).catch(console.error);
+          } else {
+            setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: realDuration } : t));
+          }
           updateMediaSession(isPlayingRef.current, realDuration, audio.currentTime);
         }
         audio.playbackRate = playerState.playbackRate;
@@ -2171,10 +2197,16 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const addTrack = async (file: File, durationOverride?: number, sourceType: 'record' | 'import' = 'import') => {
     const id = Math.random().toString(36).substr(2, 9);
     deletedTrackIds.delete(id);
+
+    let initialDuration = durationOverride || 0;
+    if (!initialDuration || initialDuration === 0) {
+      initialDuration = await getAudioDuration(file);
+    }
+
     const newTrack: Track = {
       id, name: file.name.replace(/\.[^/.]+$/, ""), artist: "",
       url: URL.createObjectURL(file), coverUrl: UNIFORM_PLACEHOLDER,
-      isFavorite: false, timestamps: [], duration: durationOverride || 0, playbackRate: 1,
+      isFavorite: false, timestamps: [], duration: initialDuration, playbackRate: 1,
       order: tracks.length, listenTime: 0, playCount: 0, fileBlob: file, sourceType: sourceType,
       lastModified: new Date().toISOString()
     };
