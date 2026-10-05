@@ -52,6 +52,7 @@ public class MediaSessionPlugin extends Plugin {
     private final int NOTIFICATION_ID = 1;
     private AudioFocusRequest audioFocusRequest = null;
     private PowerManager.WakeLock wakeLock = null;
+    private long lastFocusRequestedTime = 0L;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -515,6 +516,7 @@ public class MediaSessionPlugin extends Plugin {
 
     private void requestAudioFocusInternal() {
         try {
+            lastFocusRequestedTime = System.currentTimeMillis();
             AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
             if (am == null) return;
 
@@ -530,7 +532,10 @@ public class MediaSessionPlugin extends Plugin {
                         .setOnAudioFocusChangeListener(new AudioManager.OnAudioFocusChangeListener() {
                             @Override
                             public void onAudioFocusChange(int focusChange) {
-                                if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                                long now = System.currentTimeMillis();
+                                if (now - lastFocusRequestedTime < 1500) return;
+
+                                if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
                                     JSObject obj = new JSObject();
                                     obj.put("action", "pause");
                                     notifyListeners("mediaAction", obj);
@@ -546,7 +551,10 @@ public class MediaSessionPlugin extends Plugin {
                     new AudioManager.OnAudioFocusChangeListener() {
                         @Override
                         public void onAudioFocusChange(int focusChange) {
-                            if (focusChange == AudioManager.AUDIOFOCUS_LOSS || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                            long now = System.currentTimeMillis();
+                            if (now - lastFocusRequestedTime < 1500) return;
+
+                            if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
                                 JSObject obj = new JSObject();
                                 obj.put("action", "pause");
                                 notifyListeners("mediaAction", obj);

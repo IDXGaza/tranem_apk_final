@@ -64,6 +64,31 @@ const UNIFORM_PLACEHOLDER = "https://images.unsplash.com/photo-1614613535308-eb5
 
 const deletedTrackIds = new Set<string>();
 
+const getAudioDuration = (file: File): Promise<number> => {
+  return new Promise((resolve) => {
+    try {
+      const audio = new Audio();
+      const url = URL.createObjectURL(file);
+      audio.src = url;
+      audio.onloadedmetadata = () => {
+        const dur = audio.duration;
+        URL.revokeObjectURL(url);
+        if (isFinite(dur) && !isNaN(dur) && dur > 0) {
+          resolve(dur);
+        } else {
+          resolve(0);
+        }
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+    } catch (e) {
+      resolve(0);
+    }
+  });
+};
+
 const App: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>(() => {
     try {
@@ -853,6 +878,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const coverInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastUpdateTimeRef = useRef<number>(0);
+  const lastPlayRequestedTimeRef = useRef<number>(0);
   const tracksRef = useRef<Track[]>([]);
   const currentTrackIndexRef = useRef<number | null>(null);
   const isPlayingRef = useRef<boolean>(false);
@@ -1427,32 +1453,102 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
   }, [getTrackCoverArtwork]);
 
-  const handleSeek = useCallback((time: number) => {
+  const handleSeek = useCallback(async (time: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
     const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time }));
-      updateMediaSession(isPlayingRef.current, audio.duration, time);
-    }
-  }, [updateMediaSession]);
+    if (!audio) return;
 
-  const handleTimestampSeek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
-      updateMediaSession(true, audio.duration, time);
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(error => {
-          setPlayerState(prev => ({ ...prev, isPlaying: false }));
-          if (error.name !== 'NotAllowedError') {
-            console.error(error);
+    initAudioCtx();
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {}
+    }
+
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    const track = currentIdx !== null ? currentTracks[currentIdx] : null;
+
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null) && track) {
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try { playUrl = URL.createObjectURL(track.fileBlob); } catch (e) {}
+      }
+      if (!playUrl) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
           }
-        });
+        } catch (e) {}
+      }
+      if (!playUrl && track.audioUrl) playUrl = track.audioUrl;
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) playUrl = track.url;
+
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
       }
     }
-  }, [updateMediaSession]);
+
+    audio.currentTime = time;
+    setPlayerState(prev => ({ ...prev, currentTime: time }));
+    updateMediaSession(isPlayingRef.current, audio.duration, time);
+  }, [initAudioCtx, updateMediaSession]);
+
+  const handleTimestampSeek = useCallback(async (time: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    initAudioCtx();
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {}
+    }
+
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    const track = currentIdx !== null ? currentTracks[currentIdx] : null;
+
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null) && track) {
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try { playUrl = URL.createObjectURL(track.fileBlob); } catch (e) {}
+      }
+      if (!playUrl) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
+          }
+        } catch (e) {}
+      }
+      if (!playUrl && track.audioUrl) playUrl = track.audioUrl;
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) playUrl = track.url;
+
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
+      }
+    }
+
+    audio.currentTime = time;
+    setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
+    updateMediaSession(true, audio.duration, time);
+
+    try {
+      await audio.play();
+    } catch (error: any) {
+      if (error.name !== 'NotAllowedError') {
+        console.error('Timestamp play error:', error);
+      }
+      setPlayerState(prev => ({ ...prev, isPlaying: false }));
+    }
+  }, [initAudioCtx, updateMediaSession]);
 
   const handleSkip = useCallback((seconds: number) => {
     const audio = audioRef.current;
@@ -1474,6 +1570,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [updateMediaSession]);
 
   const handlePlay = useCallback(async () => {
+    lastPlayRequestedTimeRef.current = Date.now();
     const audio = audioRef.current;
     if (!audio) return;
 
@@ -1488,16 +1585,32 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const currentTracks = tracksRef.current;
     const track = currentIdx !== null ? currentTracks[currentIdx] : null;
 
-    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && track) {
-      let playUrl = track.url;
-      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
+    if (track) {
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try {
+          playUrl = URL.createObjectURL(track.fileBlob);
+        } catch (e) {}
+      }
+
+      if (!playUrl) {
         try {
           const full = await getTrackFromDB(track.id);
           if (full?.fileBlob) {
             playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
           }
         } catch (e) {}
       }
+
+      if (!playUrl && track.audioUrl) {
+        playUrl = track.audioUrl;
+      }
+
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) {
+        playUrl = track.url;
+      }
+
       if (playUrl) {
         audio.src = playUrl;
         audio.load();
@@ -1506,16 +1619,34 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
 
     setPlayerState(prev => ({ ...prev, isPlaying: true }));
     updateMediaSession(true);
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(err => {
-        console.error("Playback failed:", err);
-        setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      });
+
+    try {
+      await audio.play();
+    } catch (err: any) {
+      console.warn("Primary play attempt failed, retriving fresh blob from IndexedDB:", err);
+      if (track) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            const freshUrl = URL.createObjectURL(full.fileBlob);
+            audio.src = freshUrl;
+            audio.load();
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: freshUrl } : t));
+            await audio.play();
+            setPlayerState(prev => ({ ...prev, isPlaying: true }));
+            updateMediaSession(true);
+            return;
+          }
+        } catch (retryErr) {
+          console.error("Retry play failed:", retryErr);
+        }
+      }
+      setPlayerState(prev => ({ ...prev, isPlaying: false }));
     }
   }, [initAudioCtx, updateMediaSession]);
 
   const handleSelectTrack = useCallback(async (index: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
     triggerBackgroundAndNotificationPermissionIfNeeded();
     const track = tracks[index];
     if (!track) return;
@@ -1530,34 +1661,62 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     setPlayerState(prev => ({ ...prev, isPlaying: true, currentTime: 0 }));
     updateMediaSession(true, undefined, undefined, updatedTrack);
     
-    let playUrl = track.url;
-    if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
-      if (!track.fileBlob) {
-        try {
-          const full = await getTrackFromDB(track.id);
-          if (full?.fileBlob) {
-            playUrl = URL.createObjectURL(full.fileBlob);
-            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
-          }
-        } catch (e) {
-          console.warn("Failed to get track audio blob:", e);
+    let playUrl: string | null = null;
+    if (track.fileBlob) {
+      try {
+        playUrl = URL.createObjectURL(track.fileBlob);
+      } catch (e) {}
+    }
+
+    if (!playUrl) {
+      try {
+        const full = await getTrackFromDB(track.id);
+        if (full?.fileBlob) {
+          playUrl = URL.createObjectURL(full.fileBlob);
+          setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
         }
+      } catch (e) {
+        console.warn("Failed to get track audio blob:", e);
       }
     }
 
-    // Attempt play immediately to capture user gesture
+    if (!playUrl && track.audioUrl) {
+      playUrl = track.audioUrl;
+    }
+
+    if (!playUrl && track.url && !track.url.startsWith('blob:')) {
+      playUrl = track.url;
+    }
+
     if (audioRef.current) {
       initAudioCtx();
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        try {
+          await audioCtxRef.current.resume();
+        } catch (e) {}
+      }
+
+      if (playUrl) {
+        audioRef.current.src = playUrl;
+        audioRef.current.load();
+      }
+
       try {
-        if (playUrl) {
-          audioRef.current.src = playUrl;
-          audioRef.current.load();
-        }
-        
         const playPromise = audioRef.current.play();
         if (playPromise !== undefined) {
-          playPromise.catch(e => {
-            if (e.name !== 'NotAllowedError') console.warn("Select track play failed:", e);
+          playPromise.catch(async (e) => {
+            console.warn("Select track initial play failed, attempting retry from DB:", e);
+            try {
+              const full = await getTrackFromDB(track.id);
+              if (full?.fileBlob && audioRef.current) {
+                const freshUrl = URL.createObjectURL(full.fileBlob);
+                audioRef.current.src = freshUrl;
+                audioRef.current.load();
+                await audioRef.current.play();
+              }
+            } catch (retryErr) {
+              setPlayerState(prev => ({ ...prev, isPlaying: false }));
+            }
           });
         }
       } catch (e) {
@@ -1618,45 +1777,11 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     triggerBackgroundAndNotificationPermissionIfNeeded();
     const audio = audioRef.current;
     if (!audio) return;
-    initAudioCtx();
 
     if (playerState.isPlaying) {
-      audio.pause();
-      setPlayerState(prev => ({ ...prev, isPlaying: false }));
-      updateMediaSession(false);
-      return;
-    }
-
-    // Ensure audio src is loaded if not already
-    if ((!audio.src || audio.src === '' || audio.src === window.location.href) && currentTrack) {
-      let playUrl = currentTrack.url;
-      if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !currentTrack.audioUrl)) {
-        try {
-          const full = await getTrackFromDB(currentTrack.id);
-          if (full?.fileBlob) {
-            playUrl = URL.createObjectURL(full.fileBlob);
-            setTracks(prev => prev.map(t => t.id === currentTrack.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
-          }
-        } catch (e) {
-          console.warn("PlayPause get blob error:", e);
-        }
-      }
-      if (playUrl) {
-        audio.src = playUrl;
-        audio.load();
-      }
-    }
-
-    setPlayerState(prev => ({ ...prev, isPlaying: true }));
-    updateMediaSession(true);
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(error => {
-        setPlayerState(prev => ({ ...prev, isPlaying: false }));
-        if (error.name !== 'NotAllowedError') {
-          console.error(error);
-        }
-      });
+      handlePause();
+    } else {
+      await handlePlay();
     }
   };
 
@@ -1808,10 +1933,12 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             executeHeadphoneAction(gestureSettingsRef.current.singleTap);
           } else if (data.action === 'play') {
             handlePlay();
-          } else if (data.action === 'pause') {
-            handlePause();
-          } else if (data.action === 'stop') {
-            handlePause();
+          } else if (data.action === 'pause' || data.action === 'stop') {
+            if (Date.now() - lastPlayRequestedTimeRef.current < 1500) {
+              console.log('Ignoring transient pause/stop action right after play request');
+            } else {
+              handlePause();
+            }
           } else if (data.action === 'seek' && typeof data.position === 'number') {
             handleSeek(data.position);
           }
@@ -1973,7 +2100,15 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         } catch (e) { /* ignore */ }
       }
     };
-    const onEnded = () => playerState.isLooping ? (audio.currentTime = 0, audio.play().catch(() => {})) : handleSkipToNext();
+    const onEnded = () => {
+      if (!audio || audio.currentTime < 0.5 || isNaN(audio.duration) || audio.duration <= 0) return;
+      if (playerState.isLooping) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      } else {
+        handleSkipToNext();
+      }
+    };
     const onWaiting = () => setPlayerState(prev => ({ ...prev, isLoading: true }));
     
     const onPlaying = () => {
@@ -1986,6 +2121,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     };
     
     const onPause = () => {
+      if (Date.now() - lastPlayRequestedTimeRef.current < 1200) {
+        console.log('Ignoring transient audio element pause event right after play');
+        return;
+      }
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
       updateMediaSession(false);
       if ('mediaSession' in navigator) {
@@ -2019,7 +2158,20 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       if (audio && currentTrackIndex !== null) {
         if (isFinite(audio.duration) && !isNaN(audio.duration) && audio.duration > 0) {
           const realDuration = audio.duration;
-          setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: realDuration } : t));
+          const currentTracks = tracksRef.current;
+          const activeTrack = currentTrackIndexRef.current !== null && currentTrackIndexRef.current < currentTracks.length ? currentTracks[currentTrackIndexRef.current] : null;
+          
+          if (activeTrack && (!activeTrack.duration || Math.abs(activeTrack.duration - realDuration) > 0.2)) {
+            const updatedTrack = { ...activeTrack, duration: realDuration, lastModified: new Date().toISOString() };
+            setTracks(prev => {
+              const newTracks = prev.map((t, idx) => idx === currentTrackIndex ? updatedTrack : t);
+              updateTracksMetaCache(newTracks);
+              return newTracks;
+            });
+            saveTrackToDB(updatedTrack).catch(console.error);
+          } else {
+            setTracks(prev => prev.map((t, idx) => idx === currentTrackIndex ? { ...t, duration: realDuration } : t));
+          }
           updateMediaSession(isPlayingRef.current, realDuration, audio.currentTime);
         }
         audio.playbackRate = playerState.playbackRate;
@@ -2171,10 +2323,16 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const addTrack = async (file: File, durationOverride?: number, sourceType: 'record' | 'import' = 'import') => {
     const id = Math.random().toString(36).substr(2, 9);
     deletedTrackIds.delete(id);
+
+    let initialDuration = durationOverride || 0;
+    if (!initialDuration || initialDuration === 0) {
+      initialDuration = await getAudioDuration(file);
+    }
+
     const newTrack: Track = {
       id, name: file.name.replace(/\.[^/.]+$/, ""), artist: "",
       url: URL.createObjectURL(file), coverUrl: UNIFORM_PLACEHOLDER,
-      isFavorite: false, timestamps: [], duration: durationOverride || 0, playbackRate: 1,
+      isFavorite: false, timestamps: [], duration: initialDuration, playbackRate: 1,
       order: tracks.length, listenTime: 0, playCount: 0, fileBlob: file, sourceType: sourceType,
       lastModified: new Date().toISOString()
     };
