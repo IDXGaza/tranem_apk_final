@@ -878,6 +878,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const coverInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastUpdateTimeRef = useRef<number>(0);
+  const lastPlayRequestedTimeRef = useRef<number>(0);
   const tracksRef = useRef<Track[]>([]);
   const currentTrackIndexRef = useRef<number | null>(null);
   const isPlayingRef = useRef<boolean>(false);
@@ -1499,6 +1500,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [updateMediaSession]);
 
   const handlePlay = useCallback(async () => {
+    lastPlayRequestedTimeRef.current = Date.now();
     const audio = audioRef.current;
     if (!audio) return;
 
@@ -1574,6 +1576,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [initAudioCtx, updateMediaSession]);
 
   const handleSelectTrack = useCallback(async (index: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
     triggerBackgroundAndNotificationPermissionIfNeeded();
     const track = tracks[index];
     if (!track) return;
@@ -1860,10 +1863,12 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             executeHeadphoneAction(gestureSettingsRef.current.singleTap);
           } else if (data.action === 'play') {
             handlePlay();
-          } else if (data.action === 'pause') {
-            handlePause();
-          } else if (data.action === 'stop') {
-            handlePause();
+          } else if (data.action === 'pause' || data.action === 'stop') {
+            if (Date.now() - lastPlayRequestedTimeRef.current < 1500) {
+              console.log('Ignoring transient pause/stop action right after play request');
+            } else {
+              handlePause();
+            }
           } else if (data.action === 'seek' && typeof data.position === 'number') {
             handleSeek(data.position);
           }
@@ -2025,7 +2030,15 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         } catch (e) { /* ignore */ }
       }
     };
-    const onEnded = () => playerState.isLooping ? (audio.currentTime = 0, audio.play().catch(() => {})) : handleSkipToNext();
+    const onEnded = () => {
+      if (!audio || audio.currentTime < 0.5 || isNaN(audio.duration) || audio.duration <= 0) return;
+      if (playerState.isLooping) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      } else {
+        handleSkipToNext();
+      }
+    };
     const onWaiting = () => setPlayerState(prev => ({ ...prev, isLoading: true }));
     
     const onPlaying = () => {
@@ -2038,6 +2051,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     };
     
     const onPause = () => {
+      if (Date.now() - lastPlayRequestedTimeRef.current < 1200) {
+        console.log('Ignoring transient audio element pause event right after play');
+        return;
+      }
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
       updateMediaSession(false);
       if ('mediaSession' in navigator) {
