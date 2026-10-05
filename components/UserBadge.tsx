@@ -381,38 +381,6 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                   </div>
                 )}
 
-                {/* مركز تحديثات التطبيق والتلقائية */}
-                <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-150 dark:border-slate-800/80 shadow-sm space-y-3.5 text-right">
-                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800/60 pb-3">
-                    <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100">
-                      <RefreshCw className="w-4.5 h-4.5 text-[#4da8ab]" />
-                      <div>
-                        <span className="text-xs font-black">مركز التحديثات والتلقائية</span>
-                        <p className="text-[10px] text-slate-400">تحديثات التطبيق بدون حاجة لحذف النسخة القديمة</p>
-                      </div>
-                    </div>
-                    <span className="text-[10px] font-bold text-[#4da8ab] bg-[#4da8ab]/10 px-2.5 py-1 rounded-xl border border-[#4da8ab]/20">
-                      إصدار v1.2.0 (أحدث نسخة)
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                    تستطيع الآن تثبيت أي تحديث جديد مباشرة عبر تنزيل ملف الـ APK وتثبيته فوق النسخة الحالية كترقية حية دون الحاجة لحذف التطبيق القديم أو فقدان مكتبتك وإعداداتك، كما يتم تحديث ميزات السحابة تلقائياً بشكل مباشر (Live Sync).
-                  </p>
-
-                  <div className="pt-1 flex flex-col gap-2">
-                    <button
-                      onClick={() => {
-                        window.location.reload();
-                      }}
-                      className="w-full flex items-center justify-center gap-2 bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20 text-[#4da8ab] py-2.5 px-4 rounded-xl text-xs font-black transition-all duration-200 active:scale-95 cursor-pointer"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>تنشيط الميزات والتحقق من التحديثات الفورية</span>
-                    </button>
-                  </div>
-                </div>
-
                 {/* Quick Actions Panel */}
                 <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-150 dark:border-slate-800/80 shadow-sm space-y-3.5 text-right">
                   <h3 className="text-xs font-black text-slate-800 dark:text-slate-100 flex items-center gap-2 border-b border-slate-100 dark:border-slate-800/60 pb-3">

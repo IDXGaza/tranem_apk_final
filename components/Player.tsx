@@ -53,6 +53,7 @@ const Player: React.FC<PlayerProps> = ({
             type="range" min={0} max={safeDuration} value={state.currentTime} 
             onChange={(e) => onSeek(Number(e.target.value))}
             className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20"
+            style={{ direction: 'rtl' }}
             disabled={hasError || state.isLoading}
           />
           <div className="w-full h-1.5 bg-slate-100/50 dark:bg-slate-800/50 rounded-full relative overflow-hidden">
