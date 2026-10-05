@@ -74,6 +74,13 @@ jobs:
             sed -i '/defaultConfig {/a \        multiDexEnabled true' android/app/build.gradle
           fi
 
+          # Set dynamic incrementing versionCode and versionName to allow seamless in-place APK updates without uninstalling
+          RUN_NUM="${{ github.run_number }}"
+          VER_CODE=$((100 + RUN_NUM))
+          sed -i "s/versionCode 1/versionCode ${VER_CODE}/g" android/app/build.gradle
+          sed -i "s/versionName \"1.0\"/versionName \"1.2.${RUN_NUM}\"/g" android/app/build.gradle
+          echo "Updated Android app/build.gradle with versionCode=${VER_CODE} and versionName=1.2.${RUN_NUM}"
+
       - name: Prepare google-services.json
         run: |
           python3 -c '

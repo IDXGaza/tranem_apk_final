@@ -1514,21 +1514,32 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const track = currentIdx !== null ? currentTracks[currentIdx] : null;
 
     if (track) {
-      let needsLoad = !audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null;
-      let playUrl = track.url;
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try {
+          playUrl = URL.createObjectURL(track.fileBlob);
+        } catch (e) {}
+      }
 
-      if (needsLoad || !playUrl || playUrl === '' || playUrl.startsWith('http')) {
+      if (!playUrl) {
         try {
           const full = await getTrackFromDB(track.id);
           if (full?.fileBlob) {
             playUrl = URL.createObjectURL(full.fileBlob);
-            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
-            needsLoad = true;
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
           }
         } catch (e) {}
       }
 
-      if (needsLoad && playUrl) {
+      if (!playUrl && track.audioUrl) {
+        playUrl = track.audioUrl;
+      }
+
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) {
+        playUrl = track.url;
+      }
+
+      if (playUrl) {
         audio.src = playUrl;
         audio.load();
       }
@@ -1540,7 +1551,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     try {
       await audio.play();
     } catch (err: any) {
-      console.warn("Primary play attempt failed, retriving blob from IndexedDB:", err);
+      console.warn("Primary play attempt failed, retriving fresh blob from IndexedDB:", err);
       if (track) {
         try {
           const full = await getTrackFromDB(track.id);
@@ -1577,34 +1588,62 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     setPlayerState(prev => ({ ...prev, isPlaying: true, currentTime: 0 }));
     updateMediaSession(true, undefined, undefined, updatedTrack);
     
-    let playUrl = track.url;
-    if (!playUrl || playUrl === '' || (playUrl.startsWith('http') && !track.audioUrl)) {
-      if (!track.fileBlob) {
-        try {
-          const full = await getTrackFromDB(track.id);
-          if (full?.fileBlob) {
-            playUrl = URL.createObjectURL(full.fileBlob);
-            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl } : t));
-          }
-        } catch (e) {
-          console.warn("Failed to get track audio blob:", e);
+    let playUrl: string | null = null;
+    if (track.fileBlob) {
+      try {
+        playUrl = URL.createObjectURL(track.fileBlob);
+      } catch (e) {}
+    }
+
+    if (!playUrl) {
+      try {
+        const full = await getTrackFromDB(track.id);
+        if (full?.fileBlob) {
+          playUrl = URL.createObjectURL(full.fileBlob);
+          setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
         }
+      } catch (e) {
+        console.warn("Failed to get track audio blob:", e);
       }
     }
 
-    // Attempt play immediately to capture user gesture
+    if (!playUrl && track.audioUrl) {
+      playUrl = track.audioUrl;
+    }
+
+    if (!playUrl && track.url && !track.url.startsWith('blob:')) {
+      playUrl = track.url;
+    }
+
     if (audioRef.current) {
       initAudioCtx();
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        try {
+          await audioCtxRef.current.resume();
+        } catch (e) {}
+      }
+
+      if (playUrl) {
+        audioRef.current.src = playUrl;
+        audioRef.current.load();
+      }
+
       try {
-        if (playUrl) {
-          audioRef.current.src = playUrl;
-          audioRef.current.load();
-        }
-        
         const playPromise = audioRef.current.play();
         if (playPromise !== undefined) {
-          playPromise.catch(e => {
-            if (e.name !== 'NotAllowedError') console.warn("Select track play failed:", e);
+          playPromise.catch(async (e) => {
+            console.warn("Select track initial play failed, attempting retry from DB:", e);
+            try {
+              const full = await getTrackFromDB(track.id);
+              if (full?.fileBlob && audioRef.current) {
+                const freshUrl = URL.createObjectURL(full.fileBlob);
+                audioRef.current.src = freshUrl;
+                audioRef.current.load();
+                await audioRef.current.play();
+              }
+            } catch (retryErr) {
+              setPlayerState(prev => ({ ...prev, isPlaying: false }));
+            }
           });
         }
       } catch (e) {
