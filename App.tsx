@@ -1453,32 +1453,102 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     }
   }, [getTrackCoverArtwork]);
 
-  const handleSeek = useCallback((time: number) => {
+  const handleSeek = useCallback(async (time: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
     const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time }));
-      updateMediaSession(isPlayingRef.current, audio.duration, time);
-    }
-  }, [updateMediaSession]);
+    if (!audio) return;
 
-  const handleTimestampSeek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.currentTime = time;
-      setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
-      updateMediaSession(true, audio.duration, time);
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(error => {
-          setPlayerState(prev => ({ ...prev, isPlaying: false }));
-          if (error.name !== 'NotAllowedError') {
-            console.error(error);
+    initAudioCtx();
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {}
+    }
+
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    const track = currentIdx !== null ? currentTracks[currentIdx] : null;
+
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null) && track) {
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try { playUrl = URL.createObjectURL(track.fileBlob); } catch (e) {}
+      }
+      if (!playUrl) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
           }
-        });
+        } catch (e) {}
+      }
+      if (!playUrl && track.audioUrl) playUrl = track.audioUrl;
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) playUrl = track.url;
+
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
       }
     }
-  }, [updateMediaSession]);
+
+    audio.currentTime = time;
+    setPlayerState(prev => ({ ...prev, currentTime: time }));
+    updateMediaSession(isPlayingRef.current, audio.duration, time);
+  }, [initAudioCtx, updateMediaSession]);
+
+  const handleTimestampSeek = useCallback(async (time: number) => {
+    lastPlayRequestedTimeRef.current = Date.now();
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    initAudioCtx();
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      try {
+        await audioCtxRef.current.resume();
+      } catch (e) {}
+    }
+
+    const currentIdx = currentTrackIndexRef.current;
+    const currentTracks = tracksRef.current;
+    const track = currentIdx !== null ? currentTracks[currentIdx] : null;
+
+    if ((!audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null) && track) {
+      let playUrl: string | null = null;
+      if (track.fileBlob) {
+        try { playUrl = URL.createObjectURL(track.fileBlob); } catch (e) {}
+      }
+      if (!playUrl) {
+        try {
+          const full = await getTrackFromDB(track.id);
+          if (full?.fileBlob) {
+            playUrl = URL.createObjectURL(full.fileBlob);
+            setTracks(prev => prev.map(t => t.id === track.id ? { ...t, fileBlob: full.fileBlob, url: playUrl! } : t));
+          }
+        } catch (e) {}
+      }
+      if (!playUrl && track.audioUrl) playUrl = track.audioUrl;
+      if (!playUrl && track.url && !track.url.startsWith('blob:')) playUrl = track.url;
+
+      if (playUrl) {
+        audio.src = playUrl;
+        audio.load();
+      }
+    }
+
+    audio.currentTime = time;
+    setPlayerState(prev => ({ ...prev, currentTime: time, isPlaying: true }));
+    updateMediaSession(true, audio.duration, time);
+
+    try {
+      await audio.play();
+    } catch (error: any) {
+      if (error.name !== 'NotAllowedError') {
+        console.error('Timestamp play error:', error);
+      }
+      setPlayerState(prev => ({ ...prev, isPlaying: false }));
+    }
+  }, [initAudioCtx, updateMediaSession]);
 
   const handleSkip = useCallback((seconds: number) => {
     const audio = audioRef.current;
