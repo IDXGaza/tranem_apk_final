@@ -55,7 +55,6 @@ import {
   getAllTracksFromDB,
   getTrackFromDB,
   updateTracksMetaCache,
-  restoreFromSafetyVault,
   ensureStoragePersistence,
   setOnDBChangedCallback
 } from './services/db';
@@ -161,7 +160,6 @@ const App: React.FC = () => {
   }, [gestureSettings]);
 
   const [storagePersisted, setStoragePersisted] = useState(false);
-  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
 
   const bassFilterRef = useRef<BiquadFilterNode | null>(null);
   const midBassFilterRef = useRef<BiquadFilterNode | null>(null);
@@ -1162,24 +1160,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             return;
           }
 
-          // If still empty after retries, attempt recovery from safety vault
-          try {
-            const vaultTracks = await restoreFromSafetyVault();
-            if (!isCancelled && vaultTracks && vaultTracks.length > 0) {
-              const sortedTracks = vaultTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
-              const tracksWithUrls = sortedTracks.map(t => ({
-                ...t,
-                url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
-                coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
-              }));
-              setTracks(tracksWithUrls);
-              updateTracksMetaCache(tracksWithUrls);
-              setVaultNotice('تمت استعادة الأناشيد تلقائياً من مستودع الأمان الاحتياطي ✅');
-              setIsInitialLoading(false);
-              return;
-            }
-          } catch (vaultErr) {}
-
           setIsInitialLoading(false);
         }
       } catch (e) {
@@ -1189,22 +1169,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     };
     loadLocalData();
     return () => { isCancelled = true; };
-  }, []);
-
-  const handleRestoreFromSafetyVault = useCallback(async () => {
-    const restored = await restoreFromSafetyVault();
-    const sorted = restored.sort((a, b) => (a.order || 0) - (b.order || 0));
-    const withUrls = sorted.map(t => ({
-      ...t,
-      url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
-      coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
-    }));
-    setTracks(withUrls);
-    updateTracksMetaCache(withUrls);
-    if (withUrls.length > 0) {
-      setCurrentTrackIndex(0);
-      setVaultNotice('تمت استعادة أناشيدك بنجاح من مستودع الأمان الاحتياطي! ✅');
-    }
   }, []);
 
   const [hasNotificationPermission, setHasNotificationPermission] = useState<boolean>(() => {
@@ -2438,9 +2402,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     // Already saved inside handleMoveTrack to prevent stale closure bugs
   };
 
-  const handleShareTrack = () => {
-    if (!currentTrack) return;
-    setSharingTrack(currentTrack);
+  const handleShareTrack = (trackToShare?: Track) => {
+    const target = trackToShare || currentTrack;
+    if (!target) return;
+    setSharingTrack(target);
   };
 
   const handleShare = async () => {
@@ -2529,7 +2494,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             loginError={loginError}
             onShareApp={handleShare}
             storagePersisted={storagePersisted}
-            onRestoreSafetyVault={handleRestoreFromSafetyVault}
             isBackgroundOptimized={isBackgroundOptimized}
             onRequestBackgroundPermission={requestBackgroundPlaybackPermission}
           />
@@ -2555,6 +2519,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
                 setIsDriveModalOpen(true);
               }}
               onEditTrack={handleOpenEditModal}
+              onShareTrack={handleShareTrack}
               isLoading={isInitialLoading}
               className="fixed inset-y-0 right-0 h-full w-[85%] sm:w-[400px] shadow-2xl z-[200] lg:!relative lg:!w-full lg:!shadow-none lg:!z-10 lg:!inset-auto"
             />
@@ -2573,14 +2538,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               />
             ) : currentTrack ? (
               <div className="w-full flex flex-col items-center space-y-6 md:space-y-10 animate-in fade-in duration-500">
-                {vaultNotice && (
-                  <div className="w-full max-w-sm mx-auto px-4 py-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-between gap-3 text-xs text-emerald-800 dark:text-emerald-200 animate-in fade-in">
-                    <span className="font-semibold">{vaultNotice}</span>
-                    <button onClick={() => setVaultNotice(null)} className="p-1 text-slate-400 hover:text-emerald-600">
-                      ✕
-                    </button>
-                  </div>
-                )}
                 {!hasNotificationPermission && (
                   <div className="w-full max-w-sm mx-auto px-4 py-2.5 rounded-2xl bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-teal-500/10 border border-amber-500/20 flex items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
                     <div className="flex items-center gap-2">
@@ -2631,7 +2588,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
                       <svg className="w-4 h-4 text-slate-400 group-hover/artist:text-[#4da8ab] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                     </button>
                     <button 
-                      onClick={handleShareTrack}
+                      onClick={() => handleShareTrack()}
                       className="p-2.5 text-[#4da8ab] hover:bg-[#4da8ab]/10 rounded-xl transition-all active:scale-90 border border-[#4da8ab]/20"
                       title="مشاركة المقطع"
                     >
@@ -2713,6 +2670,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         setBackupStatusMessage={setBackupStatusMessage}
         onBackupSuccess={recordSuccessfulBackup}
         onCancelBackup={() => setBackupCancelSignal(true)}
+        onGoogleSync={() => handleStartSync()}
+        user={user}
+        onGoogleLogin={() => handleStartSync(undefined, true)}
+        syncProgress={syncProgress}
       />
 
       <HeadphoneControlsModal

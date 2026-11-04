@@ -1,11 +1,68 @@
 import React, { useState } from 'react';
 import { Track } from '../types';
+import { Capacitor } from '@capacitor/core';
+import { getTrackFromDB } from '../services/db';
 
 interface ShareTrackModalProps {
   isOpen: boolean;
   onClose: () => void;
   track: Track | null;
 }
+
+const getAudioBlob = async (track: Track): Promise<Blob | null> => {
+  if (track.fileBlob && track.fileBlob.size > 0) {
+    return track.fileBlob;
+  }
+
+  try {
+    const fullTrack = await getTrackFromDB(track.id);
+    if (fullTrack?.fileBlob && fullTrack.fileBlob.size > 0) {
+      return fullTrack.fileBlob;
+    }
+  } catch (err) {
+    console.warn('Could not load track from IndexedDB for sharing:', err);
+  }
+
+  const fetchUrl = track.audioUrl || (track.url && !track.url.startsWith('blob:') ? track.url : null);
+  if (fetchUrl) {
+    try {
+      const res = await fetch(fetchUrl);
+      if (res.ok) {
+        return await res.blob();
+      }
+    } catch (fetchErr) {
+      console.warn('Could not fetch audio blob from URL for sharing:', fetchErr);
+    }
+  }
+
+  return null;
+};
+
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('فشل استخراج بيانات الملف الصوتي'));
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result.substring(result.indexOf(',') + 1);
+      resolve(base64);
+    };
+    reader.readAsDataURL(blob);
+  });
+};
+
+const getFileExtension = (blob: Blob, name?: string): string => {
+  const nameExt = (name || '').split('.').pop()?.toLowerCase();
+  if (nameExt && ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'].includes(nameExt)) {
+    return nameExt;
+  }
+  const type = blob.type || '';
+  if (type.includes('wav')) return 'wav';
+  if (type.includes('mp4') || type.includes('m4a') || type.includes('aac')) return 'm4a';
+  if (type.includes('ogg')) return 'ogg';
+  if (type.includes('flac')) return 'flac';
+  return 'mp3';
+};
 
 export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
   isOpen,
@@ -17,75 +74,148 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
 
   if (!isOpen || !track) return null;
 
-  // Calculate file details
-  const sizeMB = track.fileBlob ? (track.fileBlob.size / (1024 * 1024)).toFixed(1) : '0.0';
   const fileType = track.fileBlob?.type || 'audio/mpeg';
   const isWav = track.name?.toLowerCase().endsWith('.wav') || fileType.includes('wav');
   const formatName = isWav ? 'WAV (غير مضغوط)' : (fileType.includes('mp4') || fileType.includes('m4a') ? 'M4A' : 'MP3');
+  const sizeMB = track.fileBlob ? (track.fileBlob.size / (1024 * 1024)).toFixed(1) : 'مباشر';
 
-  // Generate File object for sharing or downloading
-  const getShareFile = (): File | null => {
-    if (!track.fileBlob) return null;
-    try {
-      let fileName = 'audio.mp3';
-      if (track.fileBlob instanceof File && track.fileBlob.name) {
-        fileName = track.fileBlob.name;
-      } else {
-        const mimeType = track.fileBlob.type || 'audio/mpeg';
-        const extension = mimeType.includes('mpeg') ? 'mp3' : (mimeType.split('/')[1]?.split(';')[0] || 'mp3');
-        fileName = `${track.name.replace(/[\\/:*?"<>|]/g, '_')}.${extension}`;
-      }
-      return new File([track.fileBlob], fileName, { 
-        type: track.fileBlob.type || 'audio/mpeg',
-        lastModified: Date.now()
-      });
-    } catch (e) {
-      console.warn("Could not create File for sharing:", e);
-      return null;
-    }
+  const handleDownloadWithBlob = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
   };
 
-  // Option 1: Native File Share (mp3 file)
+  // Main Option: Native File Share (MP3 / Audio File)
   const handleNativeFileShare = async () => {
-    const file = getShareFile();
-    if (!file) {
-      setStatusMessage('❌ نعتذر، الملف الصوتي غير متوفر في الذاكرة حالياً.');
-      return;
-    }
-
+    if (isProcessing) return;
     setIsProcessing(true);
-    setStatusMessage('⏳ جاري تحضير الملف الصوتي للمشاركة...');
+    setStatusMessage('⏳ جاري تجهيز واستخراج الملف الصوتي للمشاركة...');
 
     try {
-      const shareTitle = track.name;
-      const shareText = `أنشودة: ${track.name}${track.artist ? ` - ${track.artist}` : ''}`;
+      const blob = await getAudioBlob(track);
+      if (!blob) {
+        setStatusMessage('❌ نعتذر، تعذر العثور على الملف الصوتي في الجهاز للمشاركة.');
+        setIsProcessing(false);
+        return;
+      }
 
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: shareTitle,
-          text: shareText,
+      const ext = getFileExtension(blob, track.name);
+      const safeName = (track.name || 'أنشودة_ترانيم')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .trim();
+      const fileName = `${safeName}.${ext}`;
+      const shareTitle = track.name;
+      const shareText = `أنشودة: ${track.name}${track.artist ? ` - ${track.artist}` : ''} | عبر تطبيق ترانيم`;
+
+      // 1. Native Mobile Platform (Capacitor APK / iOS)
+      if (Capacitor.isNativePlatform()) {
+        setStatusMessage('⏳ جاري إعداد الملف الصوتي في الذاكرة المؤقتة...');
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        const { Share } = await import('@capacitor/share');
+
+        const base64Data = await blobToBase64(blob);
+
+        try {
+          await Filesystem.deleteFile({ path: fileName, directory: Directory.Cache });
+        } catch (e) {}
+
+        const writtenFile = await Filesystem.writeFile({
+          path: fileName,
+          data: base64Data,
+          directory: Directory.Cache,
+          recursive: true
         });
-        setStatusMessage('✅ تم فتح قائمة المشاركة بنجاح!');
-      } else if (navigator.share) {
-        // Fallback to sharing as link/text if file share is not supported
-        const shareUrl = (track.audioUrl && !track.audioUrl.startsWith('blob:')) ? track.audioUrl : window.location.origin;
-        await navigator.share({
-          title: shareTitle,
-          text: shareText,
-          url: shareUrl
-        });
-        setStatusMessage('ℹ️ مشاركة الملف كملف مباشر غير مدعومة في متصفحك، تم إرسال معلومات الأنشودة كرابط.');
+
+        setStatusMessage('🚀 جاري فتح قائمة مشاركة النظام...');
+
+        try {
+          await Share.share({
+            title: shareTitle,
+            text: shareText,
+            url: writtenFile.uri,
+            files: [writtenFile.uri],
+            dialogTitle: 'مشاركة الملف الصوتي المباشر'
+          });
+          setStatusMessage('✅ تم فتح قائمة المشاركة بنجاح! اختر التطبيق (واتساب، تيليجرام...) لإرسال الملف الصوتي.');
+        } catch (shareErr: any) {
+          if (shareErr.name === 'AbortError' || shareErr.message?.includes('canceled') || shareErr.message?.includes('dismissed')) {
+            setStatusMessage(null);
+          } else {
+            console.warn('Native share fallback to download:', shareErr);
+            handleDownloadWithBlob(blob, fileName);
+            setStatusMessage('🎉 تم تنزيل الملف الصوتي بنجاح على جهازك!');
+          }
+        }
       } else {
-        // Fallback to download
-        handleDownload();
-        setStatusMessage('ℹ️ متصفحك لا يدعم مشاركة الملفات، تم تنزيل الملف مباشرة بدلاً من ذلك.');
+        // 2. Web / Browser platform
+        const file = new File([blob], fileName, {
+          type: blob.type || `audio/${ext}`,
+          lastModified: Date.now()
+        });
+
+        let sharedSuccessfully = false;
+
+        if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({
+              files: [file],
+              title: shareTitle,
+              text: shareText
+            });
+            sharedSuccessfully = true;
+            setStatusMessage('✅ تم فتح قائمة المشاركة بنجاح!');
+          } catch (shareErr: any) {
+            if (shareErr.name === 'AbortError' || shareErr.message?.includes('canceled') || shareErr.message?.includes('dismissed')) {
+              sharedSuccessfully = true;
+              setStatusMessage(null);
+            } else {
+              console.warn('Navigator file share restricted by browser, trying link or download fallback:', shareErr);
+            }
+          }
+        }
+
+        if (!sharedSuccessfully && typeof navigator !== 'undefined' && navigator.share) {
+          try {
+            const shareUrl = (track.audioUrl && !track.audioUrl.startsWith('blob:')) ? track.audioUrl : window.location.origin;
+            await navigator.share({
+              title: shareTitle,
+              text: shareText,
+              url: shareUrl
+            });
+            sharedSuccessfully = true;
+            setStatusMessage('ℹ️ تم فتح نافذة مشاركة التفاصيل والرابط بنجاح.');
+          } catch (linkErr: any) {
+            if (linkErr.name === 'AbortError' || linkErr.message?.includes('canceled') || linkErr.message?.includes('dismissed')) {
+              sharedSuccessfully = true;
+              setStatusMessage(null);
+            }
+          }
+        }
+
+        if (!sharedSuccessfully) {
+          handleDownloadWithBlob(blob, fileName);
+          setStatusMessage('🎉 تم تنزيل وتأمين الملف الصوتي على جهازك بنجاح!');
+        }
       }
     } catch (err: any) {
-      if (err.name === 'AbortError') {
+      if (err.name === 'AbortError' || err.message?.includes('canceled') || err.message?.includes('dismissed')) {
         setStatusMessage(null);
+      } else if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+        console.warn('Share permission denied by environment, executing download fallback.');
+        const blob = await getAudioBlob(track);
+        if (blob) {
+          const ext = getFileExtension(blob, track.name);
+          const safeName = (track.name || 'أنشودة_ترانيم').replace(/[\\/:*?"<>|]/g, '_').trim();
+          handleDownloadWithBlob(blob, `${safeName}.${ext}`);
+        }
+        setStatusMessage('🎉 تم تنزيل وتأمين الملف الصوتي على جهازك بنجاح!');
       } else {
-        console.error('File share failed:', err);
+        console.error('File share error:', err);
         setStatusMessage(`❌ حدث خطأ أثناء المشاركة: ${err.message || 'غير معروف'}`);
       }
     } finally {
@@ -109,27 +239,59 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
     window.open(url, '_blank');
   };
 
-  // Option 4: Direct Download File
-  const handleDownload = () => {
-    if (!track.fileBlob) {
-      setStatusMessage('❌ نعتذر، الملف غير متوفر للتنزيل.');
-      return;
-    }
+  // Option 4: Download & Save File Directly
+  const handleDownload = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+    setStatusMessage('⏳ جاري استخراج الملف الصوتي للتنزيل...');
+
     try {
-      const file = getShareFile();
-      if (!file) return;
-      const url = URL.createObjectURL(file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatusMessage('🎉 تم بدء تنزيل الملف الصوتي بنجاح!');
+      const blob = await getAudioBlob(track);
+      if (!blob) {
+        setStatusMessage('❌ نعتذر، تعذر العثور على الملف الصوتي في الجهاز للتنزيل.');
+        return;
+      }
+
+      const ext = getFileExtension(blob, track.name);
+      const safeName = (track.name || 'أنشودة_ترانيم').replace(/[\\/:*?"<>|]/g, '_').trim();
+      const fileName = `${safeName}.${ext}`;
+
+      if (Capacitor.isNativePlatform()) {
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        const { Share } = await import('@capacitor/share');
+        const base64Data = await blobToBase64(blob);
+
+        const targetDirectory = Directory.Documents;
+        try {
+          await Filesystem.deleteFile({ path: fileName, directory: targetDirectory });
+        } catch (e) {}
+
+        const result = await Filesystem.writeFile({
+          path: fileName,
+          data: base64Data,
+          directory: targetDirectory,
+          recursive: true
+        });
+
+        try {
+          await Share.share({
+            title: track.name,
+            text: 'حفظ الملف الصوتي',
+            url: result.uri,
+            dialogTitle: 'حفظ أو إرسال الملف الصوتي'
+          });
+        } catch (e) {}
+
+        setStatusMessage('🎉 تم حفظ الملف الصوتي بنجاح في مجلد المستندات بالجهاز!');
+      } else {
+        handleDownloadWithBlob(blob, fileName);
+        setStatusMessage('🎉 تم بدء تنزيل الملف الصوتي بنجاح!');
+      }
     } catch (err: any) {
-      console.error('Download failed:', err);
+      console.error('Download error:', err);
       setStatusMessage('❌ فشل تنزيل الملف الصوتي.');
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -147,7 +309,7 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.482 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
               </svg>
             </div>
-            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100">خيارات مشاركة المقطع</h3>
+            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100">خيارات مشاركة المقطع الصوتي</h3>
           </div>
           <button 
             onClick={onClose} 
@@ -189,10 +351,10 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
           {statusMessage && (
             <div className={`p-3 text-xs text-center font-bold rounded-2xl border transition-all duration-300 ${
               statusMessage.includes('✅') || statusMessage.includes('🎉')
-              ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20'
-              : statusMessage.includes('⏳')
-              ? 'bg-amber-500/10 text-amber-500 border-amber-500/20 animate-pulse'
-              : 'bg-rose-500/10 text-rose-500 border-rose-500/20'
+              ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20'
+              : statusMessage.includes('⏳') || statusMessage.includes('🚀')
+              ? 'bg-amber-500/10 text-amber-600 border-amber-500/20 animate-pulse'
+              : 'bg-rose-500/10 text-rose-600 border-rose-500/20'
             }`}>
               {statusMessage}
             </div>
@@ -204,25 +366,25 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
             <button
               onClick={handleNativeFileShare}
               disabled={isProcessing}
-              className="w-full flex items-center justify-between p-3.5 bg-gradient-to-l from-slate-50 to-white dark:from-slate-950/20 dark:to-slate-900 border border-slate-200/60 dark:border-slate-800 rounded-2xl transition-all hover:border-[#4da8ab] hover:shadow-md cursor-pointer text-right group active:scale-[0.98]"
+              className="w-full flex items-center justify-between p-3.5 bg-gradient-to-l from-[#4da8ab]/10 via-slate-50 to-white dark:from-[#4da8ab]/15 dark:via-slate-950/20 dark:to-slate-900 border border-[#4da8ab]/30 rounded-2xl transition-all hover:border-[#4da8ab] hover:shadow-md cursor-pointer text-right group active:scale-[0.98]"
             >
               <div className="flex items-start gap-3">
-                <div className="p-2.5 bg-[#4da8ab]/10 rounded-xl text-[#4da8ab] group-hover:scale-110 transition-transform">
+                <div className="p-2.5 bg-[#4da8ab] text-white rounded-xl group-hover:scale-110 transition-transform shadow-sm">
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.482 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
                   </svg>
                 </div>
                 <div>
                   <p className="text-xs font-black text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
-                    <span>مشاركة كملف صوتي (MP3 / الأصلي)</span>
-                    <span className="bg-emerald-500/10 text-emerald-500 text-[8px] font-black px-1.5 py-0.5 rounded-full border border-emerald-500/15">موصى به هاتفياً</span>
+                    <span>مشاركة كملف صوتي مباشر (MP3 / الأصلي)</span>
+                    <span className="bg-emerald-500/10 text-emerald-600 text-[8px] font-black px-1.5 py-0.5 rounded-full border border-emerald-500/20">موصى به للتطبيق ⭐</span>
                   </p>
-                  <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold mt-1 leading-normal">
-                    إرسال الملف الصوتي الفعلي مباشرة إلى الواتساب، تيليجرام، وباقي التطبيقات.
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1 leading-normal">
+                    إرسال الملف الصوتي الفعلي مباشرة لـ الواتساب، تيليجرام، وباقي تطبيقات هاتف بأعلى جودة.
                   </p>
                 </div>
               </div>
-              <svg className="w-4 h-4 text-slate-400 group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <svg className="w-4 h-4 text-[#4da8ab] group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
             </button>
@@ -230,6 +392,7 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
             {/* Quick WhatsApp option */}
             <button
               onClick={handleWhatsAppShare}
+              disabled={isProcessing}
               className="w-full flex items-center justify-between p-3.5 bg-gradient-to-l from-emerald-50/20 to-white dark:from-emerald-950/5 dark:to-slate-900 border border-slate-200/60 dark:border-slate-800 rounded-2xl transition-all hover:border-emerald-500 hover:shadow-md cursor-pointer text-right group active:scale-[0.98]"
             >
               <div className="flex items-start gap-3">
@@ -239,9 +402,9 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
                   </svg>
                 </div>
                 <div>
-                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">مشاركة سريعة عبر واتساب</p>
+                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">مشاركة نص ورابط عبر واتساب</p>
                   <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold mt-1 leading-normal">
-                    إرسال اسم الأنشودة وتفاصيلها ورابطها كرسالة سريعة ومباشرة.
+                    إرسال اسم الأنشودة وتفاصيلها ورابطها كرسالة نصية سريعة.
                   </p>
                 </div>
               </div>
@@ -253,6 +416,7 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
             {/* Quick Telegram option */}
             <button
               onClick={handleTelegramShare}
+              disabled={isProcessing}
               className="w-full flex items-center justify-between p-3.5 bg-gradient-to-l from-sky-50/20 to-white dark:from-sky-950/5 dark:to-slate-900 border border-slate-200/60 dark:border-slate-800 rounded-2xl transition-all hover:border-sky-500 hover:shadow-md cursor-pointer text-right group active:scale-[0.98]"
             >
               <div className="flex items-start gap-3">
@@ -262,9 +426,9 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
                   </svg>
                 </div>
                 <div>
-                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">مشاركة سريعة عبر تيليجرام</p>
+                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">مشاركة نص ورابط عبر تيليجرام</p>
                   <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold mt-1 leading-normal">
-                    إرسال تفاصيل المقطع الصوتي كمنشور في تيليجرام.
+                    إرسال تفاصيل المقطع الصوتي كمنشور نصي في تيليجرام.
                   </p>
                 </div>
               </div>
@@ -276,6 +440,7 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
             {/* Direct Download option */}
             <button
               onClick={handleDownload}
+              disabled={isProcessing}
               className="w-full flex items-center justify-between p-3.5 bg-gradient-to-l from-slate-50 to-white dark:from-slate-950/20 dark:to-slate-900 border border-slate-200/60 dark:border-slate-800 rounded-2xl transition-all hover:border-[#4da8ab] hover:shadow-md cursor-pointer text-right group active:scale-[0.98]"
             >
               <div className="flex items-start gap-3">
@@ -285,9 +450,9 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
                   </svg>
                 </div>
                 <div>
-                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">تنزيل وحفظ الملف الصوتي</p>
+                  <p className="text-xs font-black text-slate-800 dark:text-slate-100">تنزيل وحفظ الملف في الجهاز</p>
                   <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold mt-1 leading-normal">
-                    تحميل ملف الـ {formatName} مباشرة إلى ذاكرة جهازك.
+                    تحميل ملف الـ {formatName} مباشرة إلى المستندات أو ذاكرة جهازك.
                   </p>
                 </div>
               </div>
@@ -295,11 +460,6 @@ export const ShareTrackModal: React.FC<ShareTrackModalProps> = ({
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
             </button>
-          </div>
-
-          {/* Desktop/System Helper Alert */}
-          <div className="p-3.5 bg-[#4da8ab]/5 dark:bg-[#4da8ab]/10 rounded-2xl border border-[#4da8ab]/10 text-[10px] text-[#4da8ab] font-bold leading-relaxed">
-            💡 *نصيحة ذكية:* إذا كنت تستخدم جهاز كمبيوتر أو لم تنجح المشاركة المباشرة، فخيار **"تنزيل وحفظ الملف الصوتي"** هو الأفضل، حيث يمكنك بعدها سحب الملف الصوتي وتنزيله مباشرة داخل محادثة واتساب أو تيليجرام ليرسل كصوت!
           </div>
         </div>
       </div>

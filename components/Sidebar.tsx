@@ -13,7 +13,8 @@ import {
   X, 
   Shuffle, 
   AlertCircle,
-  GripVertical
+  GripVertical,
+  Share2
 } from 'lucide-react';
 import { Track } from '../types';
 import { normalizeArabic } from '../utils/arabicNormalization';
@@ -39,6 +40,7 @@ interface SidebarProps {
   showBackupReminder?: boolean;
   onOpenBackup?: () => void;
   onEditTrack?: (track: Track) => void;
+  onShareTrack?: (track: Track) => void;
   isLoading?: boolean;
 }
 
@@ -53,7 +55,7 @@ const DropPlaceholder = () => (
 
 const Sidebar: React.FC<SidebarProps> = ({ 
   onImport, onRemove, onMove, onReorderEnd, onToggleSourceType, defaultView, setDefaultView, tracks, currentId, onSelect, onPlayRandom, isOpen = false, onClose,
-  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, isLoading = false, className
+  isRecording, onStartRecording, showBackupReminder, onOpenBackup, onEditTrack, onShareTrack, isLoading = false, className
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState<'all' | 'record' | 'import'>(defaultView);
@@ -528,6 +530,19 @@ const Sidebar: React.FC<SidebarProps> = ({
                               </span>
                               {item.track.sourceType === 'record' && <Check className="w-3 h-3" />}
                             </button>
+                            {onShareTrack && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onShareTrack(item.track);
+                                  setOpenMenuTrackId(null);
+                                }}
+                                className="w-full flex items-center gap-2 px-4 py-2.5 text-[11px] font-bold text-slate-600 dark:text-slate-300 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800 border-t border-slate-100 dark:border-slate-800/60"
+                              >
+                                <Share2 className="w-3.5 h-3.5 text-[#4da8ab]" />
+                                <span>مشاركة المقطع الصوتي</span>
+                              </button>
+                            )}
                           </motion.div>
                         </>
                       )}
