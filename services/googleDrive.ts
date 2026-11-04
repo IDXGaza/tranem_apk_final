@@ -58,6 +58,9 @@ const requestGoogleTokenViaGIS = (): Promise<string> => {
             if (response.error === 'popup_closed_by_user' || response.error === 'access_denied') {
               return reject(new Error('تم إغلاق نافذة تسجيل الدخول قبل إكمال العملية'));
             }
+            if (response.error === 'origin_mismatch' || String(response.error_description || response.error).includes('origin_mismatch')) {
+              return reject(new Error('خطأ (origin_mismatch): تم فتح رابط الويب الخارجي. يرجى استخدام تطبيق الـ APK المثبت على هاتفك حيث يعمل تسجيل الدخول نيتيف بدون قيود النطاقات.'));
+            }
             return reject(new Error(response.error_description || response.error || 'تم إلغاء المصادقة'));
           }
           if (!response.access_token) {
