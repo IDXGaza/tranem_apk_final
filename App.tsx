@@ -537,6 +537,24 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
               if (accessToken) {
                 localStorage.setItem('google_access_token', accessToken);
                 localStorage.setItem('google_token_acquired_at', Date.now().toString());
+
+                if (result.user) {
+                  const traneemUser = {
+                    displayName: result.user.displayName || 'مستخدم ترانيم',
+                    email: result.user.email || '',
+                    photoURL: result.user.photoURL || '',
+                    uid: result.user.uid || ('user_' + Date.now())
+                  };
+                  localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
+                  setUser(result.user);
+                }
+
+                setSyncProgress({
+                  status: 'completed',
+                  message: '🎉 اكتمل تسجيل الدخول بنجاح! جاري المزامنة السحابية...',
+                  progress: 100
+                });
+
                 handleStartSync(accessToken);
               }
             }

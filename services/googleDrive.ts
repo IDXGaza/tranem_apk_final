@@ -279,10 +279,10 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
         throw gisErr;
       }
       
-      // Fallback to Firebase Auth Popup if GIS is unavailable
+      // Fallback to Firebase Auth Redirect if GIS is unavailable
       try {
         const { auth } = await import('../firebase');
-        const { signInWithPopup, GoogleAuthProvider } = await import('firebase/auth');
+        const { signInWithRedirect, GoogleAuthProvider } = await import('firebase/auth');
         
         const provider = new GoogleAuthProvider();
         provider.addScope('https://www.googleapis.com/auth/drive.appdata');
@@ -290,28 +290,8 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
           prompt: 'select_account'
         });
         
-        const result = await signInWithPopup(auth, provider);
-        const credential = GoogleAuthProvider.credentialFromResult(result);
-        const accessToken = credential?.accessToken;
-        
-        if (!accessToken) {
-          throw new Error('فشل الحصول على رمز الوصول من قوقل (Access Token).');
-        }
-
-        localStorage.setItem('google_access_token', accessToken);
-        localStorage.setItem('google_token_acquired_at', Date.now().toString());
-
-        if (result.user) {
-          const traneemUser = {
-            displayName: result.user.displayName || 'مستخدم ترانيم',
-            email: result.user.email || '',
-            photoURL: result.user.photoURL || '',
-            uid: result.user.uid || ('user_' + Date.now())
-          };
-          localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
-        }
-
-        return accessToken;
+        await signInWithRedirect(auth, provider);
+        return '';
       } catch (fbErr: any) {
         let friendlyMsg = '';
         const errorCode = fbErr?.code || '';
