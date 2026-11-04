@@ -260,56 +260,73 @@ export const getAccessToken = async (forceInteractive: boolean = false): Promise
       throw new Error('ExpiredToken');
     }
 
-    // Web platform: Use Firebase Auth Popup directly (uses authorized firebaseapp.com handler to prevent origin_mismatch errors)
+    // Web platform: First try Google Identity Services (GIS) OAuth Token Client directly.
+    // GIS works on any web domain (Vercel, custom domain, preview) without requiring Firebase Authorized Domains.
     try {
-      const { auth } = await import('../firebase');
-      const { signInWithPopup, GoogleAuthProvider } = await import('firebase/auth');
-      
-      const provider = new GoogleAuthProvider();
-      provider.addScope('https://www.googleapis.com/auth/drive.appdata');
-      provider.setCustomParameters({
-        prompt: 'select_account'
-      });
-      
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      const accessToken = credential?.accessToken;
-      
-      if (!accessToken) {
+      const token = await requestGoogleTokenViaGIS();
+      if (!token) {
         throw new Error('فشل الحصول على رمز الوصول من قوقل (Access Token).');
       }
-
-      localStorage.setItem('google_access_token', accessToken);
-      localStorage.setItem('google_token_acquired_at', Date.now().toString());
-
-      if (result.user) {
-        const traneemUser = {
-          displayName: result.user.displayName || 'مستخدم ترانيم',
-          email: result.user.email || '',
-          photoURL: result.user.photoURL || '',
-          uid: result.user.uid || ('user_' + Date.now())
-        };
-        localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
-      }
-
-      return accessToken;
-    } catch (err: any) {
-      let friendlyMsg = '';
-      const errorCode = err?.code || '';
-      const errorMsg = err?.message || '';
+      return token;
+    } catch (gisErr: any) {
+      console.warn('Google Identity Services (GIS) token request failed/fallback:', gisErr);
       
-      if (errorCode === 'auth/cancelled-popup-request' || errorMsg.includes('cancelled-popup-request')) {
-        friendlyMsg = 'تم إلغاء طلب تسجيل الدخول أو استبداله.';
-      } else if (errorCode === 'auth/popup-closed-by-user' || errorMsg.includes('popup-closed-by-user')) {
-        friendlyMsg = 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.';
-      } else if (errorCode === 'auth/popup-blocked' || errorMsg.includes('popup-blocked')) {
-        friendlyMsg = 'تم حظر نافذة تسجيل الدخول المنبثقة من قبل المتصفح. يرجى السماح بالنوافذ المنبثقة وحاول مجدداً.';
-      } else if (errorCode === 'auth/unauthorized-domain' || errorMsg.includes('unauthorized-domain')) {
-        friendlyMsg = 'النطاق الحالي غير مصرح له في إعدادات Firebase Auth.';
-      } else {
-        friendlyMsg = errorMsg || errorCode || 'حدث خطأ أثناء المصادقة.';
+      const gisMsg = String(gisErr?.message || '');
+      if (gisMsg.includes('إغلاق') || gisMsg.includes('إلغاء') || gisMsg.includes('closed') || gisMsg.includes('cancel')) {
+        throw gisErr;
       }
-      throw new Error(`فشل تسجيل الدخول: ${friendlyMsg}`);
+      
+      // Fallback to Firebase Auth Popup if GIS is unavailable
+      try {
+        const { auth } = await import('../firebase');
+        const { signInWithPopup, GoogleAuthProvider } = await import('firebase/auth');
+        
+        const provider = new GoogleAuthProvider();
+        provider.addScope('https://www.googleapis.com/auth/drive.appdata');
+        provider.setCustomParameters({
+          prompt: 'select_account'
+        });
+        
+        const result = await signInWithPopup(auth, provider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        const accessToken = credential?.accessToken;
+        
+        if (!accessToken) {
+          throw new Error('فشل الحصول على رمز الوصول من قوقل (Access Token).');
+        }
+
+        localStorage.setItem('google_access_token', accessToken);
+        localStorage.setItem('google_token_acquired_at', Date.now().toString());
+
+        if (result.user) {
+          const traneemUser = {
+            displayName: result.user.displayName || 'مستخدم ترانيم',
+            email: result.user.email || '',
+            photoURL: result.user.photoURL || '',
+            uid: result.user.uid || ('user_' + Date.now())
+          };
+          localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
+        }
+
+        return accessToken;
+      } catch (fbErr: any) {
+        let friendlyMsg = '';
+        const errorCode = fbErr?.code || '';
+        const errorMsg = fbErr?.message || '';
+        
+        if (errorCode === 'auth/cancelled-popup-request' || errorMsg.includes('cancelled-popup-request')) {
+          friendlyMsg = 'تم إلغاء طلب تسجيل الدخول أو استبداله.';
+        } else if (errorCode === 'auth/popup-closed-by-user' || errorMsg.includes('popup-closed-by-user')) {
+          friendlyMsg = 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.';
+        } else if (errorCode === 'auth/popup-blocked' || errorMsg.includes('popup-blocked')) {
+          friendlyMsg = 'تم حظر نافذة تسجيل الدخول المنبثقة من قبل المتصفح. يرجى السماح بالنوافذ المنبثقة وحاول مجدداً.';
+        } else if (errorCode === 'auth/unauthorized-domain' || errorMsg.includes('unauthorized-domain')) {
+          friendlyMsg = 'النطاق الحالي غير مضاف في قائمة النطاقات المصرحة لـ Firebase. يرجى فتح التطبيق كـ APK أو استخدام GIS.';
+        } else {
+          friendlyMsg = errorMsg || errorCode || 'حدث خطأ أثناء المصادقة.';
+        }
+        throw new Error(`فشل تسجيل الدخول: ${friendlyMsg}`);
+      }
     }
   }
 };
