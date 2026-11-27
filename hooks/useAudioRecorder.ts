@@ -1,5 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+const VoiceRecorderPlugin = registerPlugin<any>('VoiceRecorder');
+const getVoiceRecorder = () => {
+  if (!Capacitor.isPluginAvailable('VoiceRecorder')) {
+    throw new Error('VoiceRecorder plugin is not installed');
+  }
+  return VoiceRecorderPlugin;
+};
 
 const base64ToBlob = (base64: string, mimeType: string): Blob => {
   const byteCharacters = atob(base64);
@@ -62,7 +70,7 @@ const createSilentAudioBlob = (): Blob => {
 const requestMicPermission = async (): Promise<boolean> => {
   if (Capacitor.isNativePlatform()) {
     try {
-      const { VoiceRecorder } = await import('capacitor-voice-recorder');
+      const VoiceRecorder = getVoiceRecorder();
       const hasPermission = await VoiceRecorder.hasAudioRecordingPermission();
       if (hasPermission.value) {
         return true;
@@ -144,7 +152,7 @@ export const useAudioRecorder = (onImport: (file: File, durationOverride?: numbe
 
       if (Capacitor.isNativePlatform()) {
         try {
-          const { VoiceRecorder } = await import('capacitor-voice-recorder');
+          const VoiceRecorder = getVoiceRecorder();
           const canRecord = await VoiceRecorder.canDeviceVoiceRecord();
           if (!canRecord.value) {
             alert("الجهاز الحالي لا يدعم عملية تسجيل الصوت.");
@@ -264,7 +272,7 @@ export const useAudioRecorder = (onImport: (file: File, durationOverride?: numbe
   const stopRecording = useCallback(async () => {
     if (Capacitor.isNativePlatform()) {
       try {
-        const { VoiceRecorder } = await import('capacitor-voice-recorder');
+        const VoiceRecorder = getVoiceRecorder();
         const result = await VoiceRecorder.stopRecording();
         cleanup();
         
@@ -307,7 +315,7 @@ export const useAudioRecorder = (onImport: (file: File, durationOverride?: numbe
   const togglePause = useCallback(async () => {
     if (Capacitor.isNativePlatform()) {
       try {
-        const { VoiceRecorder } = await import('capacitor-voice-recorder');
+        const VoiceRecorder = getVoiceRecorder();
         if (isPaused) {
           if (silencePlayerRef.current) silencePlayerRef.current.play().catch(() => {});
           await VoiceRecorder.resumeRecording();
@@ -355,7 +363,7 @@ export const useAudioRecorder = (onImport: (file: File, durationOverride?: numbe
   const cancelRecording = useCallback(async () => {
     if (Capacitor.isNativePlatform()) {
       try {
-        const { VoiceRecorder } = await import('capacitor-voice-recorder');
+        const VoiceRecorder = getVoiceRecorder();
         await VoiceRecorder.stopRecording(); // consume the recording and discard
         cleanup();
         setIsRecording(false);

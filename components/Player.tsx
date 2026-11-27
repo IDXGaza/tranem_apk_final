@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { 
   Heart, 
@@ -7,8 +6,7 @@ import {
   RotateCw, 
   Play, 
   Pause, 
-  Flag,
-  Headphones
+  Flag
 } from 'lucide-react';
 import { Track, PlayerState } from '../types';
 
@@ -18,7 +16,6 @@ interface PlayerProps {
   onPlayPause: () => void;
   onSeek: (time: number) => void;
   onSkip: (seconds: number) => void;
-  onRateChange: (rate: number) => void;
   onToggleFavorite: () => void;
   onToggleLoop: () => void;
   onAddTimestamp: () => void;
@@ -35,15 +32,15 @@ const formatTime = (time: number) => {
 };
 
 const Player: React.FC<PlayerProps> = ({ 
-  track, state, onPlayPause, onSeek, onSkip, onToggleFavorite, onToggleLoop, onAddTimestamp, onOpenHeadphones, isHeadsetConnected, hasError 
+  track, state, onPlayPause, onSeek, onSkip, onToggleFavorite, onToggleLoop, onAddTimestamp, hasError 
 }) => {
   if (!track) return null;
 
   const safeDuration = track.duration && isFinite(track.duration) && !isNaN(track.duration) ? track.duration : Math.max(state.currentTime, 100);
   
   return (
-    <div className={`w-full flex flex-col py-4 px-5 md:px-10 transition-all duration-500 ${hasError ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
-      
+    <div className={`w-full flex flex-col py-4 px-4 sm:px-6 md:px-10 transition-all duration-500 relative ${hasError ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
+
       <div className="w-full flex items-center gap-3 mb-3">
         <span className="text-[9px] md:text-[10px] font-black text-slate-400 dark:text-slate-500 tabular-nums w-8 text-right">
           {formatTime(state.currentTime)}
@@ -71,19 +68,19 @@ const Player: React.FC<PlayerProps> = ({
         </span>
       </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1 md:gap-2 flex-1 justify-start">
-          <button onClick={onToggleFavorite} className={`p-2 transition-all active:scale-90 ${track.isFavorite ? 'text-rose-500' : 'text-slate-300 dark:text-slate-600 hover:text-rose-400'}`}>
+      <div className="flex items-center justify-between gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-0.5 sm:gap-1.5 md:gap-2 flex-1 justify-start">
+          <button onClick={onToggleFavorite} className={`p-1.5 sm:p-2 transition-all active:scale-90 ${track.isFavorite ? 'text-rose-500' : 'text-slate-300 dark:text-slate-600 hover:text-rose-400'}`} title="المفضلة">
             <Heart className="w-5 h-5 md:w-6 md:h-6" fill={track.isFavorite ? "currentColor" : "none"} strokeWidth={2.5} />
           </button>
 
-          <button onClick={onToggleLoop} className={`p-2 transition-all active:scale-90 ${state.isLooping ? 'text-[#4da8ab]' : 'text-slate-300 dark:text-slate-600 hover:text-[#4da8ab]/50'}`} title="تكرار النشيد">
+          <button onClick={onToggleLoop} className={`p-1.5 sm:p-2 transition-all active:scale-90 ${state.isLooping ? 'text-[#4da8ab]' : 'text-slate-300 dark:text-slate-600 hover:text-[#4da8ab]/50'}`} title="تكرار النشيد">
             <Repeat className="w-5 h-5 md:w-6 md:h-6" strokeWidth={2.5} />
           </button>
         </div>
 
-        <div className="flex items-center justify-center gap-3 md:gap-8">
-          <button onClick={() => onSkip(-10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
+        <div className="flex items-center justify-center gap-2 sm:gap-4 md:gap-8">
+          <button onClick={() => onSkip(-10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
             <RotateCw className="w-5 h-5 md:w-7 md:h-7" strokeWidth={2.5} />
             <span className="text-[8px] font-black mt-0.5">10</span>
           </button>
@@ -98,14 +95,14 @@ const Player: React.FC<PlayerProps> = ({
             )}
           </button>
 
-          <button onClick={() => onSkip(10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
+          <button onClick={() => onSkip(10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
             <RotateCcw className="w-5 h-5 md:w-7 md:h-7" strokeWidth={2.5} />
             <span className="text-[8px] font-black mt-0.5">10</span>
           </button>
         </div>
 
         <div className="flex items-center justify-end gap-1 md:gap-2 flex-1">
-          <button onClick={onAddTimestamp} className="p-2.5 md:p-3 text-[#4da8ab] bg-[#4da8ab]/5 dark:bg-[#4da8ab]/10 hover:bg-[#4da8ab]/10 dark:hover:bg-[#4da8ab]/20 rounded-xl md:rounded-2xl active:scale-90 transition-all" disabled={hasError || state.isLoading}>
+          <button onClick={onAddTimestamp} className="p-2.5 md:p-3 text-[#4da8ab] bg-[#4da8ab]/5 dark:bg-[#4da8ab]/10 hover:bg-[#4da8ab]/10 dark:hover:bg-[#4da8ab]/20 rounded-xl md:rounded-2xl active:scale-90 transition-all" disabled={hasError || state.isLoading} title="إضافة علامة زمنية">
             <Flag className="w-5 h-5 md:w-6 md:h-6" strokeWidth={2.5} />
           </button>
         </div>

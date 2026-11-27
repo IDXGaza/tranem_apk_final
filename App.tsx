@@ -8,18 +8,19 @@ const MediaSession = registerPlugin<{
     isPlaying: boolean; 
     duration?: number; 
     position?: number; 
+    playbackRate?: number;
   }) => Promise<void>;
-  updatePlaybackState: (opts: { isPlaying: boolean; position?: number; duration?: number }) => Promise<void>;
+  updatePlaybackState: (opts: { isPlaying: boolean; position?: number; duration?: number; playbackRate?: number }) => Promise<void>;
   hideNotification: () => Promise<void>;
   requestNotificationPermission: () => Promise<{ granted: boolean; requested?: boolean }>;
   checkNotificationPermission: () => Promise<{ granted: boolean }>;
   isHeadsetConnected: () => Promise<{ connected: boolean; deviceName?: string }>;
+  isIgnoringBatteryOptimizations: () => Promise<{ isIgnoring: boolean }>;
+  requestIgnoreBatteryOptimizations: () => Promise<{ requested: boolean }>;
+  openBatterySettings: () => Promise<{ opened: boolean }>;
 }>('MediaSession');
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as fflate from 'fflate';
-import { signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
-import { collection, addDoc, getDocs, doc, setDoc, deleteDoc } from 'firebase/firestore';
-import { db, auth } from './firebase';
 import { Track, Timestamp, PlayerState } from './types';
 import Sidebar from './components/Sidebar';
 import Player from './components/Player';
@@ -40,23 +41,16 @@ import {
 } from './components/HeadphoneControlsModal';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Headphones } from 'lucide-react';
-
-// Cloud Sync integrations
-import { runCloudSync, SyncProgress } from './services/cloudSync';
-import { getAccessToken } from './services/googleDrive';
-import { LoginScreen } from './components/LoginScreen';
 import { UserBadge } from './components/UserBadge';
 
 // Unified robust database service (anti-data-loss & safety vault)
 import {
-  initDB,
   saveTrackToDB,
   deleteTrackFromDB,
   getAllTracksFromDB,
   getTrackFromDB,
   updateTracksMetaCache,
-  ensureStoragePersistence,
-  setOnDBChangedCallback
+  ensureStoragePersistence
 } from './services/db';
 
 const UNIFORM_PLACEHOLDER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&h=600&auto=format&fit=crop";
@@ -206,25 +200,6 @@ const App: React.FC = () => {
     return false;
   });
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [user, setUser] = useState<any>(() => {
-    try {
-      const cached = localStorage.getItem('traneem_user');
-      return cached ? JSON.parse(cached) : null;
-    } catch {
-      return null;
-    }
-  });
-  const [isSkipLogin, setIsSkipLogin] = useState(() => {
-    return localStorage.getItem('skip_cloud_sync') === 'true';
-  });
-  const [syncProgress, setSyncProgress] = useState<SyncProgress>({
-    status: 'idle',
-    message: '',
-    progress: 0
-  });
-  const syncDebounceRef = useRef<any>(null);
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
   const [isDriveModalOpen, setIsDriveModalOpen] = useState(false);
   const [backupModalMode, setBackupModalMode] = useState<'backup' | 'import' | null>(null);
   const [isBackupProcessing, setIsBackupProcessing] = useState(false);
@@ -285,12 +260,18 @@ const App: React.FC = () => {
     setShowBackupReminder(false);
   };
 
-const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0.65): Promise<Blob> => {
+const compressImageBlob = (
+  blob: Blob,
+  maxDim: number = 250,
+  quality: number = 0.65,
+  preferWebP: boolean = false
+): Promise<Blob> => {
   return new Promise((resolve) => {
     const img = new Image();
-    img.src = URL.createObjectURL(blob);
+    const objUrl = URL.createObjectURL(blob);
+    img.src = objUrl;
     img.onload = () => {
-      URL.revokeObjectURL(img.src);
+      URL.revokeObjectURL(objUrl);
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       if (!ctx) {
@@ -308,20 +289,123 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           h = maxDim;
         }
       }
-      canvas.width = w;
-      canvas.height = h;
-      ctx.drawImage(img, 0, 0, w, h);
-      canvas.toBlob((resultBlob) => {
-        resolve(resultBlob || blob);
-      }, 'image/jpeg', quality);
+      canvas.width = Math.max(1, w);
+      canvas.height = Math.max(1, h);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      const finishJpeg = () => {
+        canvas.toBlob((jpegBlob) => {
+          resolve(jpegBlob && jpegBlob.size < blob.size ? jpegBlob : blob);
+        }, 'image/jpeg', quality);
+      };
+
+      if (preferWebP) {
+        canvas.toBlob((webpBlob) => {
+          if (webpBlob && webpBlob.size > 0 && webpBlob.type === 'image/webp') {
+            resolve(webpBlob.size < blob.size ? webpBlob : blob);
+          } else {
+            finishJpeg();
+          }
+        }, 'image/webp', quality);
+      } else {
+        canvas.toBlob((resultBlob) => {
+          resolve(resultBlob || blob);
+        }, 'image/jpeg', quality);
+      }
     };
     img.onerror = () => {
+      URL.revokeObjectURL(objUrl);
       resolve(blob);
     };
   });
 };
 
-  const [backupCancelSignal, setBackupCancelSignal] = useState(false);
+const computeBlobFastHash = async (blob: Blob): Promise<string> => {
+  const size = blob.size;
+  const head = new Uint8Array(await blob.slice(0, Math.min(4096, size)).arrayBuffer());
+  const tailStart = Math.max(0, size - 4096);
+  const tail = new Uint8Array(await blob.slice(tailStart, size).arrayBuffer());
+  let h1 = 2166136261;
+  for (let i = 0; i < head.length; i++) {
+    h1 ^= head[i];
+    h1 = Math.imul(h1, 16777619);
+  }
+  let h2 = 2166136261;
+  for (let i = 0; i < tail.length; i++) {
+    h2 ^= tail[i];
+    h2 = Math.imul(h2, 16777619);
+  }
+  return `${size}_${(h1 >>> 0).toString(36)}_${(h2 >>> 0).toString(36)}`;
+};
+
+const encodeMonoWav16 = (samples: Float32Array, sampleRate: number): Blob => {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+};
+
+const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
+  try {
+    if (blob.size < 512 * 1024) return blob;
+    const headerBuf = await blob.slice(0, 44).arrayBuffer();
+    if (headerBuf.byteLength < 44) return blob;
+    const hv = new DataView(headerBuf);
+    const isRiff = hv.getUint32(0, false) === 0x52494646; // "RIFF"
+    const isWave = hv.getUint32(8, false) === 0x57415645; // "WAVE"
+    if (!isRiff || !isWave) return blob;
+
+    const channels = hv.getUint16(22, true);
+    const sampleRate = hv.getUint32(24, true);
+    const bitsPerSample = hv.getUint16(34, true);
+    if (channels === 1 && sampleRate <= 22050 && bitsPerSample <= 16) return blob;
+
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const OfflineCtx = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
+    if (!AudioCtx || !OfflineCtx) return blob;
+
+    const tempCtx = new AudioCtx();
+    const rawBuf = await blob.arrayBuffer();
+    const decoded = await tempCtx.decodeAudioData(rawBuf);
+    tempCtx.close().catch(() => {});
+
+    const targetRate = 22050;
+    const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
+    const offline = new OfflineCtx(1, targetLength, targetRate);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    const compactWav = encodeMonoWav16(rendered.getChannelData(0), targetRate);
+    return compactWav.size < blob.size ? compactWav : blob;
+  } catch {
+    return blob;
+  }
+};
+
+  const backupCancelRef = useRef(false);
 
   const createBackupZipBlob = async (
     metadataOnly: boolean = false, 
@@ -330,101 +414,140 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   ): Promise<Blob> => {
     setIsBackupProcessing(true);
     setBackupStatusMessage('⏳ جاري جلب البيانات من الذاكرة...');
-    setBackupCancelSignal(false);
+    backupCancelRef.current = false;
     try {
       const allTracks = await getAllTracksFromDB();
-      // Filter out excluded tracks
       const filteredTracks = allTracks.filter(t => !excludedTrackIds.includes(t.id));
-      const files: any = {};
-      
-      // Map to deduplicate audio files using size + hash of first 1KB
-      const fileKeyToPathMap = new Map<string, string>();
-      
-      // Parallelize processing to maximize speed
-      await Promise.all(filteredTracks.map(async (t, i) => {
-        if (backupCancelSignal) throw new Error('العملية ألغيت');
-        
-        const trackMetadata = { ...t };
-        
-        // Progress reporting (every 5 tracks to avoid UI lag)
-        if (i % 5 === 0 || i === filteredTracks.length - 1) {
-          setBackupStatusMessage(`📦 تجهيز: ${t.name} (${i + 1}/${filteredTracks.length})`);
+
+      const audioKeyToPathMap = new Map<string, string>();
+      const coverKeyToPathMap = new Map<string, string>();
+      const compactMetadataList: any[] = [];
+
+      const zipChunks: Uint8Array<ArrayBuffer>[] = [];
+      let zipError: Error | null = null;
+      let resolveZipDone!: (blob: Blob) => void;
+      let rejectZipDone!: (err: any) => void;
+      const zipDonePromise = new Promise<Blob>((resolve, reject) => {
+        resolveZipDone = resolve;
+        rejectZipDone = reject;
+      });
+
+      const zip = new fflate.Zip((err, chunk, final) => {
+        if (err) {
+          zipError = err;
+          rejectZipDone(err);
+          return;
         }
+        if (chunk && chunk.length > 0) {
+          zipChunks.push(new Uint8Array(chunk));
+        }
+        if (final) {
+          resolveZipDone(new Blob(zipChunks, { type: 'application/zip' }));
+        }
+      });
+
+      const pushStreamedEntry = async (path: string, data: Uint8Array) => {
+        const entry = new fflate.ZipDeflate(path, { level: 9, mem: 12 });
+        zip.add(entry);
+        const CHUNK_SIZE = 512 * 1024;
+        if (data.length === 0) {
+          entry.push(new Uint8Array(0), true);
+          return;
+        }
+        for (let offset = 0; offset < data.length; offset += CHUNK_SIZE) {
+          if (backupCancelRef.current) throw new Error('CANCELLED');
+          const end = Math.min(offset + CHUNK_SIZE, data.length);
+          const isLast = end >= data.length;
+          entry.push(data.subarray(offset, end), isLast);
+          if (!isLast) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+      };
+
+      for (let i = 0; i < filteredTracks.length; i++) {
+        if (backupCancelRef.current || zipError) throw new Error('CANCELLED');
+        const t = filteredTracks[i];
+
+        setBackupStatusMessage(`🗜️ ضغط أقصى (${i + 1}/${filteredTracks.length}): ${t.name}`);
+
+        const trackMeta: any = {
+          id: t.id,
+          name: t.name,
+          artist: t.artist || '',
+          isFavorite: !!t.isFavorite,
+          timestamps: Array.isArray(t.timestamps) ? t.timestamps : [],
+          duration: t.duration || 0,
+          playbackRate: t.playbackRate || 1,
+          order: t.order ?? i,
+          playCount: t.playCount || 0,
+          listenTime: t.listenTime || 0,
+          sourceType: t.sourceType || 'import',
+        };
 
         if (!metadataOnly && t.fileBlob) {
-          // Calculate quick hash from size and first 1KB
-          const size = t.fileBlob.size;
-          const slice = t.fileBlob.slice(0, 1024);
-          const sliceBuf = await slice.arrayBuffer();
-          const arr = new Uint8Array(sliceBuf);
-          let hash = 0;
-          for (let j = 0; j < arr.length; j++) {
-            hash = (hash << 5) - hash + arr[j];
-            hash |= 0;
+          let audioBlob: Blob = t.fileBlob;
+          const isWav = (audioBlob as File).name?.toLowerCase().endsWith('.wav') ||
+            audioBlob.type === 'audio/wav' ||
+            audioBlob.type === 'audio/x-wav';
+          if (isWav) {
+            audioBlob = await optimizeWavAudioForBackup(audioBlob);
           }
-          const fileKey = `${size}_${hash}`;
 
-          if (fileKeyToPathMap.has(fileKey)) {
-            // Deduplicate! Reuse existing file path in zip
-            const existingPath = fileKeyToPathMap.get(fileKey)!;
-            trackMetadata.fileBlobPath = existingPath;
+          const fileKey = await computeBlobFastHash(audioBlob);
+          if (audioKeyToPathMap.has(fileKey)) {
+            trackMeta.fileBlobPath = audioKeyToPathMap.get(fileKey)!;
           } else {
-            const buf = await t.fileBlob.arrayBuffer();
-            // MP3/M4A/WebM is already compressed, store without compression for max speed
-            // But if it is a WAV file, we compress it (lossless deflate) to save massive space!
-            const isWav = t.fileBlob.name?.toLowerCase().endsWith('.wav') || 
-                          t.fileBlob.type === 'audio/wav' || 
-                          t.fileBlob.type === 'audio/x-wav';
-            const level = isWav ? 6 : 0;
-            const path = `audio/${t.id}.blob`;
-            
-            files[path] = [new Uint8Array(buf), { level }];
-            trackMetadata.fileBlobPath = path;
-            fileKeyToPathMap.set(fileKey, path);
+            const buf = new Uint8Array(await audioBlob.arrayBuffer());
+            const path = `a/${t.id}.bin`;
+            await pushStreamedEntry(path, buf);
+            trackMeta.fileBlobPath = path;
+            audioKeyToPathMap.set(fileKey, path);
+          }
+          if (audioBlob.type) {
+            trackMeta.fileMimeType = audioBlob.type;
           }
         }
-        
+
         if (!metadataOnly && t.coverBlob) {
-          let processedCover = t.coverBlob;
+          let processedCover: Blob = t.coverBlob;
           if (compressCovers) {
             try {
-              if (i % 3 === 0) {
-                setBackupStatusMessage(`⚙️ جاري ضغط الغلاف لـ: ${t.name}`);
-              }
-              processedCover = await compressImageBlob(t.coverBlob, 250, 0.65);
+              processedCover = await compressImageBlob(t.coverBlob, 150, 0.45, true);
             } catch (err) {
               console.error("Cover compression failed:", t.name, err);
             }
           }
-          const buf = await processedCover.arrayBuffer();
-          // Images are compressed, store without compression
-          files[`covers/${t.id}.blob`] = [new Uint8Array(buf), { level: 0 }];
-          trackMetadata.coverBlobPath = `covers/${t.id}.blob`;
+          const coverKey = await computeBlobFastHash(processedCover);
+          if (coverKeyToPathMap.has(coverKey)) {
+            trackMeta.coverBlobPath = coverKeyToPathMap.get(coverKey)!;
+          } else {
+            const coverBuf = new Uint8Array(await processedCover.arrayBuffer());
+            const coverPath = `c/${t.id}.bin`;
+            await pushStreamedEntry(coverPath, coverBuf);
+            trackMeta.coverBlobPath = coverPath;
+            coverKeyToPathMap.set(coverKey, coverPath);
+          }
+          if (processedCover.type) {
+            trackMeta.coverMimeType = processedCover.type;
+          }
         }
-        
-        delete trackMetadata.fileBlob;
-        delete trackMetadata.coverBlob;
-        delete trackMetadata.url;
-        delete trackMetadata.coverUrl;
-        
-        filteredTracks[i] = trackMetadata;
-      }));
 
-      if (backupCancelSignal) throw new Error('العملية ألغيت');
+        compactMetadataList.push(trackMeta);
+        // Yield to UI loop between tracks to prevent memory spikes and keep app responsive
+        await new Promise((r) => setTimeout(r, 0));
+      }
 
-      // metadata.json is text, compress it maximum to keep ZIP size down
-      files["metadata.json"] = [fflate.strToU8(JSON.stringify(filteredTracks)), { level: 9 }];
-      
-      setBackupStatusMessage('⚡ جاري الحفظ النهائي (سرعة قصوى)...');
-      return new Promise((resolve, reject) => {
-        // Main zip with no compression for immediate speed
-        fflate.zip(files, { level: 0 }, (err, data) => {
-          if (err) reject(err);
-          else resolve(new Blob([data], { type: "application/zip" }));
-        });
-      });
+      if (backupCancelRef.current) throw new Error('CANCELLED');
+
+      setBackupStatusMessage('📦 جاري التجميع النهائي بأقصى ضغط...');
+      const metaBytes = fflate.strToU8(JSON.stringify(compactMetadataList));
+      await pushStreamedEntry('metadata.json', metaBytes);
+      zip.end();
+
+      return await zipDonePromise;
     } catch (err: any) {
-      if (err.message === 'العملية ألغيت') {
+      if (err?.message === 'CANCELLED' || err?.message === 'العملية ألغيت') {
         throw new Error('CANCELLED');
       }
       throw err;
@@ -452,35 +575,48 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       
       const metadata = JSON.parse(fflate.strFromU8(metadataU8));
       
-      // Optimization: Parallel save to DB
-      await Promise.all(metadata.map(async (t: any) => {
-        const trackToSave = { ...t };
-        
-        // Fetch existing track to preserve blob if the ZIP does not contain it (e.g., metadata-only backup)
-        let existingTrack: any = null;
-        try {
-          existingTrack = await getTrackFromDB(t.id);
-        } catch (_) {}
+      // Restore in small batches to avoid memory spikes on mobile
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < metadata.length; i += BATCH_SIZE) {
+        const batch = metadata.slice(i, i + BATCH_SIZE);
+        setBackupStatusMessage(`جاري استعادة الأناشيد (${Math.min(i + BATCH_SIZE, metadata.length)}/${metadata.length})...`);
+        await Promise.all(batch.map(async (t: any) => {
+          const trackToSave = { ...t };
 
-        if (t.fileBlobPath && decompressed[t.fileBlobPath]) {
-          trackToSave.fileBlob = new Blob([decompressed[t.fileBlobPath]] as any);
-          delete trackToSave.fileBlobPath;
-        } else if (existingTrack && existingTrack.fileBlob) {
-          trackToSave.fileBlob = existingTrack.fileBlob;
-          delete trackToSave.fileBlobPath;
-        }
+          let existingTrack: any = null;
+          try {
+            existingTrack = await getTrackFromDB(t.id);
+          } catch (_) {}
 
-        if (t.coverBlobPath && decompressed[t.coverBlobPath]) {
-          trackToSave.coverBlob = new Blob([decompressed[t.coverBlobPath]] as any);
-          delete trackToSave.coverBlobPath;
-        } else if (existingTrack && existingTrack.coverBlob) {
-          trackToSave.coverBlob = existingTrack.coverBlob;
-          delete trackToSave.coverBlobPath;
-        }
+          if (t.fileBlobPath && decompressed[t.fileBlobPath]) {
+            trackToSave.fileBlob = new Blob(
+              [decompressed[t.fileBlobPath]] as any,
+              t.fileMimeType ? { type: t.fileMimeType } : undefined
+            );
+            delete trackToSave.fileBlobPath;
+            delete trackToSave.fileMimeType;
+          } else if (existingTrack && existingTrack.fileBlob) {
+            trackToSave.fileBlob = existingTrack.fileBlob;
+            delete trackToSave.fileBlobPath;
+          }
 
-        trackToSave.sourceType = 'import';
-        await saveTrackToDB(trackToSave);
-      }));
+          if (t.coverBlobPath && decompressed[t.coverBlobPath]) {
+            trackToSave.coverBlob = new Blob(
+              [decompressed[t.coverBlobPath]] as any,
+              t.coverMimeType ? { type: t.coverMimeType } : undefined
+            );
+            delete trackToSave.coverBlobPath;
+            delete trackToSave.coverMimeType;
+          } else if (existingTrack && existingTrack.coverBlob) {
+            trackToSave.coverBlob = existingTrack.coverBlob;
+            delete trackToSave.coverBlobPath;
+          }
+
+          trackToSave.sourceType = t.sourceType || 'import';
+          await saveTrackToDB(trackToSave);
+        }));
+        await new Promise((r) => setTimeout(r, 0));
+      }
       
       const local = await getAllTracksFromDB();
       const withUrls = local.map(t => ({
@@ -523,249 +659,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const touchStartXRef = useRef<number | null>(null);
   const touchStartYRef = useRef<number | null>(null);
   const isSwipeCancelledRef = useRef<boolean>(false);
-  
-  // Handle initial firebase auth listener and redirect authentication results
-  useEffect(() => {
-    // Check if returning from a browser redirect sign-in flow
-    if (!Capacitor.isNativePlatform()) {
-      import('firebase/auth').then(({ getRedirectResult, GoogleAuthProvider }) => {
-        getRedirectResult(auth)
-          .then((result) => {
-            if (result) {
-              const credential = GoogleAuthProvider.credentialFromResult(result);
-              const accessToken = credential?.accessToken;
-              if (accessToken) {
-                localStorage.setItem('google_access_token', accessToken);
-                localStorage.setItem('google_token_acquired_at', Date.now().toString());
-
-                if (result.user) {
-                  const traneemUser = {
-                    displayName: result.user.displayName || 'مستخدم ترانيم',
-                    email: result.user.email || '',
-                    photoURL: result.user.photoURL || '',
-                    uid: result.user.uid || ('user_' + Date.now())
-                  };
-                  localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
-                  setUser(result.user);
-                }
-
-                setSyncProgress({
-                  status: 'completed',
-                  message: '🎉 اكتمل تسجيل الدخول بنجاح! جاري المزامنة السحابية...',
-                  progress: 100
-                });
-
-                handleStartSync(accessToken);
-              }
-            }
-          })
-          .catch((err) => {
-            console.warn('Redirect auth result error:', err);
-          });
-      });
-    }
-
-    return onAuthStateChanged(auth, (currentUser) => {
-      if (currentUser) {
-        const traneemUser = {
-          displayName: currentUser.displayName || 'مستخدم ترانيم',
-          email: currentUser.email || '',
-          photoURL: currentUser.photoURL || '',
-          uid: currentUser.uid
-        };
-        setUser(currentUser);
-        localStorage.setItem('traneem_user', JSON.stringify(traneemUser));
-      }
-    });
-  }, []);
-
-  const handleStartSync = async (providedToken?: string, forceInteractive: boolean = false) => {
-    try {
-      setSyncProgress({ status: 'checking', message: 'جاري بدء المزامنة السحابية...', progress: 15 });
-      
-      let token = providedToken;
-      if (!token) {
-        token = await getAccessToken(forceInteractive);
-      }
-      
-      const syncedTracks = await runCloudSync(token, (prog) => {
-        setSyncProgress(prog);
-      });
-      
-      const tracksWithUrls = syncedTracks.map(t => ({
-        ...t,
-        url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
-        coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
-      }));
-      
-      setTracks(tracksWithUrls.sort((a, b) => (a.order || 0) - (b.order || 0)));
-      
-      setSyncProgress({ status: 'completed', message: 'اكتملت المزامنة بنجاح! ✅', progress: 100 });
-      setTimeout(() => {
-        setSyncProgress(prev => prev.status === 'completed' ? { status: 'idle', message: '', progress: 0 } : prev);
-      }, 3500);
-    } catch (err: any) {
-      console.warn('Sync attempt failed:', err);
-      let errMsg = err?.message || err;
-      if (errMsg === 'ExpiredToken' || String(errMsg).includes('ExpiredToken')) {
-        if (Capacitor.isNativePlatform() && !forceInteractive) {
-          // Attempt immediate silent refresh on Android
-          try {
-            const freshToken = await getAccessToken(false);
-            if (freshToken && freshToken !== providedToken) {
-              return await handleStartSync(freshToken, false);
-            }
-          } catch (silentErr) {
-            console.warn('Silent refresh attempt finished:', silentErr);
-          }
-        }
-        errMsg = 'انتهت صلاحية جلسة المزامنة. اضغط على شارة الحساب لتجديد تسجيل الدخول.';
-      }
-      setSyncProgress({ status: 'error', message: `حالة المزامنة: ${errMsg}`, progress: 100 });
-    }
-  };
-
-  const triggerGoogleLogin = async () => {
-    setIsLoggingIn(true);
-    setLoginError(null);
-    try {
-      const token = await getAccessToken(true);
-      if (token) {
-        localStorage.setItem('google_access_token', token);
-        localStorage.setItem('google_token_acquired_at', Date.now().toString());
-        localStorage.removeItem('skip_cloud_sync');
-        setIsSkipLogin(false);
-      }
-      
-      let finalUser: any = auth.currentUser;
-      if (!finalUser) {
-        const cachedUserStr = localStorage.getItem('traneem_user');
-        if (cachedUserStr) {
-          try {
-            finalUser = JSON.parse(cachedUserStr);
-          } catch (e) {
-            console.error("Failed to parse cached user:", e);
-          }
-        }
-      }
-      
-      if (!finalUser && token) {
-        // Fallback user object if profile fetch was delayed
-        finalUser = {
-          displayName: 'مستخدم ترانيم',
-          email: '',
-          photoURL: '',
-          uid: 'user_' + Date.now()
-        };
-      }
-
-      if (finalUser) {
-        setUser(finalUser);
-        localStorage.setItem('traneem_user', JSON.stringify({
-          displayName: finalUser.displayName || 'مستخدم ترانيم',
-          email: finalUser.email || '',
-          photoURL: finalUser.photoURL || '',
-          uid: finalUser.uid || ''
-        }));
-      }
-      
-      if (token) {
-        await handleStartSync(token);
-      }
-    } catch (error: any) {
-      console.error("Login failed:", error);
-      const msg = error?.message || String(error);
-      setLoginError(msg);
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await auth.signOut();
-      localStorage.removeItem('google_access_token');
-      localStorage.removeItem('google_token_acquired_at');
-      localStorage.removeItem('traneem_user');
-      localStorage.removeItem('synced_track_ids');
-      localStorage.removeItem('permanently_deleted_track_ids');
-      setUser(null);
-      
-      // Re-load offline database tracks
-      const savedTracks = await getAllTracksFromDB();
-      const sortedTracks = savedTracks.sort((a, b) => (a.order || 0) - (b.order || 0));
-      const tracksWithUrls = sortedTracks.map(t => ({
-        ...t,
-        url: t.fileBlob ? URL.createObjectURL(t.fileBlob) : (t.audioUrl || ""),
-        coverUrl: t.coverBlob ? URL.createObjectURL(t.coverBlob) : (t.coverUrl || UNIFORM_PLACEHOLDER)
-      }));
-      setTracks(tracksWithUrls);
-      if (tracksWithUrls.length > 0) {
-        setCurrentTrackIndex(0);
-      } else {
-        setCurrentTrackIndex(null);
-      }
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
-  };
-
-  const triggerAutoSyncWithCloud = useCallback(() => {
-    if (!user || isSkipLogin) return;
-
-    if (syncDebounceRef.current) {
-      clearTimeout(syncDebounceRef.current);
-    }
-
-    syncDebounceRef.current = setTimeout(async () => {
-      console.log('Debounced auto-sync triggered...');
-      try {
-        const token = await getAccessToken(false);
-        if (token) {
-          await handleStartSync(token, false);
-        }
-      } catch (e) {
-        console.log('Auto sync silent check skipped:', e);
-      }
-    }, 8000);
-  }, [user, isSkipLogin]);
-
-  // Bind the global IndexedDB change callback to trigger our auto-sync
-  useEffect(() => {
-    setOnDBChangedCallback(() => {
-      triggerAutoSyncWithCloud();
-    });
-    return () => {
-      setOnDBChangedCallback(null);
-    };
-  }, [triggerAutoSyncWithCloud]);
-
-  // Handle auto-sync on mount
-  useEffect(() => {
-    let timer: any;
-    const checkAndInitSync = async () => {
-      if (!user || isSkipLogin) return;
-      try {
-        const token = await getAccessToken(false);
-        if (token) {
-          await handleStartSync(token, false);
-        }
-      } catch (err) {
-        console.log('Initial sync check finished without blocking:', err);
-        setSyncProgress({
-          status: 'idle',
-          message: '',
-          progress: 0
-        });
-      }
-    };
-
-    timer = setTimeout(() => {
-      checkAndInitSync();
-    }, 3500);
-
-    return () => clearTimeout(timer);
-  }, [user, isSkipLogin]);
 
   const handleTouchStart = (e: React.TouchEvent) => {
     if (isRecording) return;
@@ -895,9 +788,11 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastUpdateTimeRef = useRef<number>(0);
   const lastPlayRequestedTimeRef = useRef<number>(0);
+  const isTransitioningTrackRef = useRef<boolean>(false);
   const tracksRef = useRef<Track[]>([]);
   const currentTrackIndexRef = useRef<number | null>(null);
   const isPlayingRef = useRef<boolean>(false);
+  const isLoopingRef = useRef<boolean>(playerState.isLooping);
 
   useEffect(() => {
     tracksRef.current = tracks;
@@ -911,6 +806,10 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   useEffect(() => {
     isPlayingRef.current = playerState.isPlaying;
   }, [playerState.isPlaying]);
+
+  useEffect(() => {
+    isLoopingRef.current = playerState.isLooping;
+  }, [playerState.isLooping]);
 
   const currentTrack = currentTrackIndex !== null ? tracks[currentTrackIndex] : null;
 
@@ -1075,7 +974,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const initAudioCtx = useCallback(() => {
     if (audioCtxRef.current || !audioRef.current) {
       if (audioCtxRef.current?.state === 'suspended') {
-        audioCtxRef.current.resume();
+        audioCtxRef.current.resume().catch(() => {});
       }
       return;
     }
@@ -1083,6 +982,12 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     try {
       const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioCtxRef.current = ctx;
+
+      ctx.onstatechange = () => {
+        if (ctx.state === 'suspended' && isPlayingRef.current) {
+          ctx.resume().catch(() => {});
+        }
+      };
 
       const source = ctx.createMediaElementSource(audioRef.current);
       sourceRef.current = source;
@@ -1260,7 +1165,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   const requestBackgroundPlaybackPermission = useCallback(async () => {
     if (Capacitor.isNativePlatform()) {
       try {
-        await (MediaSession as any).requestIgnoreBatteryOptimizations();
+        await MediaSession.requestIgnoreBatteryOptimizations();
         setTimeout(async () => {
           await checkBackgroundPermissionStatus();
         }, 1500);
@@ -1272,6 +1177,19 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
         setIsBackgroundOptimized(true);
       } catch (e) {}
+    }
+  }, [checkBackgroundPermissionStatus]);
+
+  const openNativeBatterySettings = useCallback(async () => {
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await MediaSession.openBatterySettings();
+        setTimeout(() => {
+          checkBackgroundPermissionStatus();
+        }, 1500);
+      } catch (e) {
+        console.warn('Open battery settings error:', e);
+      }
     }
   }, [checkBackgroundPermissionStatus]);
 
@@ -1397,7 +1315,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         if ('setPositionState' in navigator.mediaSession && duration > 0) {
           navigator.mediaSession.setPositionState({
             duration: Math.max(duration, 0.1),
-            playbackRate: audio?.playbackRate || 1.0,
+            playbackRate: 1.0,
             position: Math.min(Math.max(position, 0), duration)
           });
         }
@@ -1414,7 +1332,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           await MediaSession.updatePlaybackState({
             isPlaying,
             position,
-            duration
+            duration,
+            playbackRate: 1.0
           });
         } else {
           lastNativeTrackIdRef.current = track.id;
@@ -1426,7 +1345,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
             artworkUrl: customArtwork,
             isPlaying,
             duration,
-            position
+            position,
+            playbackRate: 1.0
           });
         }
       } catch (e) {
@@ -1628,23 +1548,29 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   }, [initAudioCtx, updateMediaSession]);
 
   const handleSelectTrack = useCallback(async (index: number) => {
+    const currentTracks = tracksRef.current;
+    const track = currentTracks[index];
+    if (!track) return;
+
+    isTransitioningTrackRef.current = true;
     lastPlayRequestedTimeRef.current = Date.now();
     triggerBackgroundAndNotificationPermissionIfNeeded();
-    const track = tracks[index];
-    if (!track) return;
     
     // Increment play count
     const updatedTrack = { ...track, playCount: (track.playCount || 0) + 1 };
     setTracks(prev => prev.map((t, i) => i === index ? updatedTrack : t));
-    saveTrackToDB(updatedTrack);
+    saveTrackToDB(updatedTrack).catch(() => {});
 
     localStorage.setItem('lastPlayedTrackId', track.id);
+    currentTrackIndexRef.current = index;
     setCurrentTrackIndex(index);
     setPlayerState(prev => ({ ...prev, isPlaying: true, currentTime: 0 }));
-    updateMediaSession(true, undefined, undefined, updatedTrack);
+    updateMediaSession(true, updatedTrack.duration || 0, 0, updatedTrack);
     
     let playUrl: string | null = null;
-    if (track.fileBlob) {
+    if (track.url && track.url.startsWith('blob:') && track.fileBlob) {
+      playUrl = track.url;
+    } else if (track.fileBlob) {
       try {
         playUrl = URL.createObjectURL(track.fileBlob);
       } catch (e) {}
@@ -1670,7 +1596,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       playUrl = track.url;
     }
 
-    if (audioRef.current) {
+    const audio = audioRef.current;
+    if (audio) {
       initAudioCtx();
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
         try {
@@ -1678,13 +1605,15 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         } catch (e) {}
       }
 
-      if (playUrl) {
-        audioRef.current.src = playUrl;
-        audioRef.current.load();
+      if (playUrl && audio.src !== playUrl) {
+        audio.src = playUrl;
+        audio.load();
+      } else if (playUrl) {
+        audio.currentTime = 0;
       }
 
       try {
-        const playPromise = audioRef.current.play();
+        const playPromise = audio.play();
         if (playPromise !== undefined) {
           playPromise.catch(async (e) => {
             console.warn("Select track initial play failed, attempting retry from DB:", e);
@@ -1697,15 +1626,20 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
                 await audioRef.current.play();
               }
             } catch (retryErr) {
+              isTransitioningTrackRef.current = false;
               setPlayerState(prev => ({ ...prev, isPlaying: false }));
             }
           });
         }
       } catch (e) {
         console.warn("Manual audio sync failed", e);
+        isTransitioningTrackRef.current = false;
       }
     }
-  }, [tracks, initAudioCtx, updateMediaSession, triggerBackgroundAndNotificationPermissionIfNeeded]);
+    setTimeout(() => {
+      isTransitioningTrackRef.current = false;
+    }, 2500);
+  }, [initAudioCtx, updateMediaSession, triggerBackgroundAndNotificationPermissionIfNeeded]);
 
   const handleShuffle = useCallback(() => {
     if (tracks.length < 2) return;
@@ -1729,8 +1663,8 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     handleSelectTrack(nextIndex);
   }, [tracks, currentTrackIndex, handleSelectTrack, shuffleHistory]);
 
-  const sortTracks = (tracks: Track[]) => {
-    return [...tracks].sort((a, b) => {
+  const sortTracks = (tracksToSort: Track[]) => {
+    return [...tracksToSort].sort((a, b) => {
       if (a.isFavorite && !b.isFavorite) return -1;
       if (!a.isFavorite && b.isFavorite) return 1;
       return (a.order ?? 0) - (b.order ?? 0);
@@ -1738,22 +1672,47 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
   };
 
   const handleSkipToNext = useCallback(() => {
-    setCurrentTrackIndex(prevIndex => {
-      if (prevIndex !== null && tracks.length > 0) {
-        const sortedTracks = sortTracks(tracks);
-        const currentTrack = tracks[prevIndex];
-        const currentSortedIndex = sortedTracks.findIndex(t => t.id === currentTrack.id);
-        
-        const nextSortedIndex = (currentSortedIndex + 1) % sortedTracks.length;
-        const nextTrack = sortedTracks[nextSortedIndex];
-        const nextIndexInTracks = tracks.findIndex(t => t.id === nextTrack.id);
-        
-        handleSelectTrack(nextIndexInTracks);
-        return nextIndexInTracks;
-      }
-      return prevIndex;
-    });
-  }, [tracks, handleSelectTrack]);
+    const currentTracks = tracksRef.current;
+    const prevIndex = currentTrackIndexRef.current;
+    if (prevIndex === null || currentTracks.length === 0) return;
+
+    const sortedTracks = sortTracks(currentTracks);
+    const activeTrack = currentTracks[prevIndex];
+    if (!activeTrack) return;
+
+    const currentSortedIndex = sortedTracks.findIndex(t => t.id === activeTrack.id);
+    const nextSortedIndex = (currentSortedIndex + 1) % sortedTracks.length;
+    const nextTrack = sortedTracks[nextSortedIndex];
+    const nextIndexInTracks = currentTracks.findIndex(t => t.id === nextTrack.id);
+
+    if (nextIndexInTracks !== -1) {
+      handleSelectTrack(nextIndexInTracks);
+    }
+  }, [handleSelectTrack]);
+
+  const handleSkipToNextRef = useRef(handleSkipToNext);
+  useEffect(() => {
+    handleSkipToNextRef.current = handleSkipToNext;
+  }, [handleSkipToNext]);
+
+  // Pre-hydrate next track blob so background auto-advance has zero IndexedDB delay when screen is locked
+  useEffect(() => {
+    if (currentTrackIndex === null || tracks.length < 2) return;
+    const sorted = sortTracks(tracks);
+    const active = tracks[currentTrackIndex];
+    if (!active) return;
+    const curSortedIdx = sorted.findIndex(t => t.id === active.id);
+    if (curSortedIdx === -1) return;
+    const upcoming = sorted[(curSortedIdx + 1) % sorted.length];
+    if (upcoming && !upcoming.fileBlob && (!upcoming.url || !upcoming.url.startsWith('blob:'))) {
+      getTrackFromDB(upcoming.id).then(full => {
+        if (full?.fileBlob) {
+          const preUrl = URL.createObjectURL(full.fileBlob);
+          setTracks(prev => prev.map(t => t.id === upcoming.id ? { ...t, fileBlob: full.fileBlob, url: preUrl } : t));
+        }
+      }).catch(() => {});
+    }
+  }, [currentTrackIndex, tracks.length]);
 
   const handlePlayPause = async () => {
     triggerBackgroundAndNotificationPermissionIfNeeded();
@@ -2083,17 +2042,26 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       }
     };
     const onEnded = () => {
-      if (!audio || audio.currentTime < 0.5 || isNaN(audio.duration) || audio.duration <= 0) return;
-      if (playerState.isLooping) {
+      if (!audio) return;
+      if (!audio.ended && audio.currentTime < 0.25) return;
+      isTransitioningTrackRef.current = true;
+      lastPlayRequestedTimeRef.current = Date.now();
+      if (isLoopingRef.current) {
         audio.currentTime = 0;
         audio.play().catch(() => {});
+        setTimeout(() => { isTransitioningTrackRef.current = false; }, 1000);
       } else {
-        handleSkipToNext();
+        handleSkipToNextRef.current();
       }
     };
     const onWaiting = () => setPlayerState(prev => ({ ...prev, isLoading: true }));
     
     const onPlaying = () => {
+      isTransitioningTrackRef.current = false;
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {});
+      }
+
       setPlayerState(prev => ({ ...prev, isLoading: false, isPlaying: true }));
       updateMediaSession(true);
       if ('mediaSession' in navigator) {
@@ -2103,6 +2071,14 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     };
     
     const onPause = () => {
+      // Do NOT treat natural track end or track switching as user pause (prevents Honor/Android from dropping WakeLock/AudioFocus before next track starts)
+      if (
+        audio.ended ||
+        isTransitioningTrackRef.current ||
+        (isFinite(audio.duration) && audio.duration > 0 && audio.currentTime >= audio.duration - 0.35)
+      ) {
+        return;
+      }
       if (Date.now() - lastPlayRequestedTimeRef.current < 1200) {
         console.log('Ignoring transient audio element pause event right after play');
         return;
@@ -2118,15 +2094,11 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     const onSeeked = () => {
       updateMediaSessionPosition();
     };
-
-    const onRateChange = () => {
-      updateMediaSessionPosition();
-    };
     
     const onCanPlay = () => {
       setLoadError(null);
       setPlayerState(prev => ({ ...prev, isLoading: false }));
-      if (playerState.isPlaying) {
+      if (isPlayingRef.current && audio.paused) {
         const playPromise = audio.play();
         if (playPromise !== undefined) {
           playPromise.catch(() => {
@@ -2156,12 +2128,12 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           }
           updateMediaSession(isPlayingRef.current, realDuration, audio.currentTime);
         }
-        audio.playbackRate = playerState.playbackRate;
         updateMediaSessionPosition();
       }
     };
 
     const onError = () => {
+      isTransitioningTrackRef.current = false;
       setLoadError("فشل تشغيل المقطع.");
       setPlayerState(prev => ({ ...prev, isPlaying: false, isLoading: false }));
     };
@@ -2172,7 +2144,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
     audio.addEventListener('playing', onPlaying);
     audio.addEventListener('pause', onPause);
     audio.addEventListener('seeked', onSeeked);
-    audio.addEventListener('ratechange', onRateChange);
     audio.addEventListener('canplay', onCanPlay);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('error', onError);
@@ -2184,18 +2155,13 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
       audio.removeEventListener('playing', onPlaying);
       audio.removeEventListener('pause', onPause);
       audio.removeEventListener('seeked', onSeeked);
-      audio.removeEventListener('ratechange', onRateChange);
       audio.removeEventListener('canplay', onCanPlay);
       audio.removeEventListener('loadedmetadata', onLoadedMetadata);
       audio.removeEventListener('error', onError);
     };
-  }, [currentTrackIndex, playerState.playbackRate, playerState.isLooping, tracks.length, playerState.isPlaying]);
+  }, [currentTrackIndex, tracks.length, updateMediaSession]);
 
   const handleToggleLoop = () => setPlayerState(prev => ({ ...prev, isLooping: !prev.isLooping }));
-  const handleRateChange = (rate: number) => {
-    if (audioRef.current) audioRef.current.playbackRate = rate;
-    setPlayerState(prev => ({ ...prev, playbackRate: rate }));
-  };
 
   const handleToggleFavorite = async () => {
     if (!currentTrack) return;
@@ -2496,24 +2462,16 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           </button>
 
           <UserBadge
-            user={user}
-            onLogout={handleLogout}
-            syncProgress={syncProgress}
-            onSyncNow={() => {
-              handleStartSync(undefined, true);
-            }}
             tracks={tracks}
             onOpenBackup={(mode) => {
               setBackupModalMode(mode || null);
               setIsDriveModalOpen(true);
             }}
-            onGoogleLogin={triggerGoogleLogin}
-            isLoggingIn={isLoggingIn}
-            loginError={loginError}
             onShareApp={handleShare}
             storagePersisted={storagePersisted}
             isBackgroundOptimized={isBackgroundOptimized}
             onRequestBackgroundPermission={requestBackgroundPlaybackPermission}
+            onOpenBatterySettings={openNativeBatterySettings}
           />
         </div>
       </header>
@@ -2662,7 +2620,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           <div className="max-w-4xl mx-auto bg-white/95 dark:bg-black/80 backdrop-blur-3xl border border-white/50 dark:border-slate-800 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.3)] rounded-[32px] pointer-events-auto transition-colors duration-300">
             <Player 
               track={currentTrack} state={playerState} onPlayPause={handlePlayPause} 
-              onSeek={handleSeek} onSkip={handleSkip} onRateChange={handleRateChange} 
+              onSeek={handleSeek} onSkip={handleSkip} 
               onToggleFavorite={handleToggleFavorite} onToggleLoop={handleToggleLoop} 
               onAddTimestamp={handleAddTimestamp}
               onOpenHeadphones={() => setIsHeadphonesModalOpen(true)}
@@ -2687,11 +2645,7 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
         backupStatusMessage={backupStatusMessage}
         setBackupStatusMessage={setBackupStatusMessage}
         onBackupSuccess={recordSuccessfulBackup}
-        onCancelBackup={() => setBackupCancelSignal(true)}
-        onGoogleSync={() => handleStartSync()}
-        user={user}
-        onGoogleLogin={() => handleStartSync(undefined, true)}
-        syncProgress={syncProgress}
+        onCancelBackup={() => { backupCancelRef.current = true; }}
       />
 
       <HeadphoneControlsModal
@@ -2816,19 +2770,6 @@ const compressImageBlob = (blob: Blob, maxDim: number = 250, quality: number = 0
           </div>
         )}
       </AnimatePresence>
-
-      {/* Onboarding Login Screen overlay */}
-      {!user && !isSkipLogin && (
-        <LoginScreen
-          onLogin={triggerGoogleLogin}
-          isLoading={isLoggingIn}
-          errorMessage={loginError}
-          onSkip={() => {
-            setIsSkipLogin(true);
-            localStorage.setItem('skip_cloud_sync', 'true');
-          }}
-        />
-      )}
     </div>
   );
 };

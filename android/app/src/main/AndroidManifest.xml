@@ -43,6 +43,12 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <service
+            android:name="com.idxgaza.traneem.MediaPlaybackService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <receiver android:name="com.idxgaza.traneem.MyMediaButtonReceiver"
             android:exported="true">
             <intent-filter android:priority="10000">

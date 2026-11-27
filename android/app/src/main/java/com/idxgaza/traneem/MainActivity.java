@@ -3,6 +3,7 @@ package com.idxgaza.traneem;
 import android.content.Intent;
 import android.os.Bundle;
 import android.view.KeyEvent;
+import android.webkit.WebSettings;
 import androidx.media.session.MediaButtonReceiver;
 import android.support.v4.media.session.MediaSessionCompat;
 import com.codetrixstudio.capacitor.GoogleAuth.GoogleAuth;
@@ -14,6 +15,14 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(GoogleAuth.class);
         registerPlugin(MediaSessionPlugin.class);
         super.onCreate(savedInstanceState);
+
+        try {
+            if (this.bridge != null && this.bridge.getWebView() != null) {
+                WebSettings settings = this.bridge.getWebView().getSettings();
+                settings.setMediaPlaybackRequiresUserGesture(false);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @Override

@@ -1,12 +1,5 @@
 {
-  "name": "Remix: Copy of ترانيم - Traneem Cloud",
-  "description": "تطبيق موسيقي متطور مع مزامنة سحابية لحفظ مكتبتك الصوتية، العلامات الزمنية، وتخصيص الأغلفة عبر جميع أجهزتك.",
-  "requestFramePermissions": [
-    "microphone",
-    "web-share",
-    "notifications"
-  ],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "name": "ترانيم",
+  "description": "منصة الأناشيد والتسجيلات الإسلامية مع العلامات الزمنية والمزامنة السحابية عبر Google Drive",
+  "request": "تطبيق ترانيم للأناشيد والمزامنة السحابية"
 }

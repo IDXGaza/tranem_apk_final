@@ -53,6 +53,21 @@ public class MediaSessionPlugin extends Plugin {
     private AudioFocusRequest audioFocusRequest = null;
     private PowerManager.WakeLock wakeLock = null;
     private long lastFocusRequestedTime = 0L;
+    private final Handler pauseGraceHandler = new Handler(Looper.getMainLooper());
+    private final Runnable pauseGraceRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!lastIsPlaying) {
+                abandonAudioFocusInternal();
+                try {
+                    if (wakeLock != null && wakeLock.isHeld()) {
+                        wakeLock.release();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    };
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -276,22 +291,23 @@ public class MediaSessionPlugin extends Plugin {
 
         activeSession = mediaSession;
         activePlugin = this;
-        updatePlaybackStateInternal(false, 0.0);
+        updatePlaybackStateInternal(false, 0.0, 1.0f);
 
         IntentFilter filter = new IntentFilter();
         filter.addAction("com.idxgaza.traneem.MEDIA_PREVIOUS");
         filter.addAction("com.idxgaza.traneem.MEDIA_PLAY_PAUSE");
         filter.addAction("com.idxgaza.traneem.MEDIA_NEXT");
 
+        Context appContext = getContext().getApplicationContext();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getContext().registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
         } else {
-            getContext().registerReceiver(receiver, filter);
+            appContext.registerReceiver(receiver, filter);
         }
 
         try {
             IntentFilter noisyFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-            getContext().registerReceiver(noisyReceiver, noisyFilter);
+            appContext.registerReceiver(noisyReceiver, noisyFilter);
         } catch (Exception ignored) {
         }
     }
@@ -374,6 +390,7 @@ public class MediaSessionPlugin extends Plugin {
     private String lastArtworkUrl = "";
     private Bitmap lastBitmap = null;
     private boolean lastIsPlaying = false;
+    private float lastPlaybackRate = 1.0f;
     private long artworkRequestId = 0L;
 
     @PluginMethod
@@ -384,12 +401,14 @@ public class MediaSessionPlugin extends Plugin {
         final boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
         final double duration = call.getDouble("duration", 0.0);
         final double position = call.getDouble("position", 0.0);
+        final float playbackRate = call.getDouble("playbackRate", (double) lastPlaybackRate).floatValue();
 
         final long currentReqId = ++artworkRequestId;
 
         lastTitle = title;
         lastArtist = artist;
         lastIsPlaying = isPlaying;
+        lastPlaybackRate = playbackRate > 0f ? playbackRate : 1.0f;
 
         final long durationMs = (long) (duration * 1000);
 
@@ -447,7 +466,7 @@ public class MediaSessionPlugin extends Plugin {
                     }
                     mediaSession.setMetadata(immediateBuilder.build());
                 }
-                updatePlaybackStateInternal(isPlaying, position);
+                updatePlaybackStateInternal(isPlaying, position, lastPlaybackRate);
                 showNotification(title, artist, targetBitmap, isPlaying);
             }
         });
@@ -588,7 +607,11 @@ public class MediaSessionPlugin extends Plugin {
         boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
         double position = call.getDouble("position", 0.0);
         double duration = call.getDouble("duration", 0.0);
+        float playbackRate = call.getDouble("playbackRate", (double) lastPlaybackRate).floatValue();
         lastIsPlaying = isPlaying;
+        if (playbackRate > 0f) {
+            lastPlaybackRate = playbackRate;
+        }
 
         if (duration > 0 && mediaSession != null) {
             long durationMs = (long) (duration * 1000);
@@ -608,16 +631,17 @@ public class MediaSessionPlugin extends Plugin {
             }
         }
 
-        updatePlaybackStateInternal(isPlaying, position);
+        updatePlaybackStateInternal(isPlaying, position, lastPlaybackRate);
         showNotification(lastTitle, lastArtist, lastBitmap, isPlaying);
         call.resolve();
     }
 
-    private void updatePlaybackStateInternal(boolean isPlaying, double positionSeconds) {
+    private void updatePlaybackStateInternal(boolean isPlaying, double positionSeconds, float playbackRate) {
         if (mediaSession == null) return;
         mediaSession.setActive(true);
         int state = isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
         long positionMs = (long) (positionSeconds * 1000);
+        float effectiveSpeed = isPlaying ? (playbackRate > 0f ? playbackRate : 1.0f) : 0.0f;
 
         PlaybackStateCompat.Builder playbackState = new PlaybackStateCompat.Builder()
             .setActions(
@@ -629,13 +653,14 @@ public class MediaSessionPlugin extends Plugin {
                 PlaybackStateCompat.ACTION_STOP |
                 PlaybackStateCompat.ACTION_SEEK_TO
             )
-            .setState(state, positionMs >= 0 ? positionMs : PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f);
+            .setState(state, positionMs >= 0 ? positionMs : PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, effectiveSpeed);
 
         mediaSession.setPlaybackState(playbackState.build());
 
-        // Background playback guard via Partial WakeLock & AudioFocus
+        // Background playback guard via Partial WakeLock, AudioFocus, and pause grace period
         try {
             if (isPlaying) {
+                pauseGraceHandler.removeCallbacks(pauseGraceRunnable);
                 requestAudioFocusInternal();
                 if (wakeLock == null) {
                     PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
@@ -645,13 +670,12 @@ public class MediaSessionPlugin extends Plugin {
                     }
                 }
                 if (wakeLock != null && !wakeLock.isHeld()) {
-                    wakeLock.acquire(12 * 60 * 60 * 1000L); // 12 hours safety timeout
+                    wakeLock.acquire(12 * 60 * 60 * 1000L);
                 }
             } else {
-                abandonAudioFocusInternal();
-                if (wakeLock != null && wakeLock.isHeld()) {
-                    wakeLock.release();
-                }
+                // Keep WakeLock and AudioFocus for 15s grace window across track transitions or brief pauses
+                pauseGraceHandler.removeCallbacks(pauseGraceRunnable);
+                pauseGraceHandler.postDelayed(pauseGraceRunnable, 15000);
             }
         } catch (Exception ignored) {
         }
@@ -663,6 +687,13 @@ public class MediaSessionPlugin extends Plugin {
         if (token == null) return;
 
         Context context = getContext();
+
+        // Keep real ForegroundService (FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) alive while playing or already running
+        if (isPlaying || MediaPlaybackService.isServiceRunning) {
+            MediaPlaybackService.startOrUpdate(context, title, artist, artwork, isPlaying);
+            return;
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             boolean granted = ContextCompat.checkSelfPermission(
                 context,
@@ -732,6 +763,7 @@ public class MediaSessionPlugin extends Plugin {
 
     @PluginMethod
     public void hideNotification(PluginCall call) {
+        MediaPlaybackService.stop(getContext());
         NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm != null) {
             nm.cancel(NOTIFICATION_ID);
@@ -831,22 +863,62 @@ public class MediaSessionPlugin extends Plugin {
         call.resolve(res);
     }
 
+    @PluginMethod
+    public void openBatterySettings(PluginCall call) {
+        boolean opened = false;
+        Intent[] oemIntents = new Intent[]{
+            new Intent().setComponent(new android.content.ComponentName("com.hihonor.systemmanager", "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity")),
+            new Intent().setComponent(new android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")),
+            new Intent().setComponent(new android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")),
+            new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getContext().getPackageName()))
+        };
+
+        for (Intent intent : oemIntents) {
+            try {
+                if (intent.resolveActivity(getContext().getPackageManager()) != null) {
+                    getActivity().startActivity(intent);
+                    opened = true;
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (!opened) {
+            try {
+                Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                fallback.setData(Uri.parse("package:" + getContext().getPackageName()));
+                getActivity().startActivity(fallback);
+                opened = true;
+            } catch (Exception ignored) {
+            }
+        }
+
+        JSObject res = new JSObject();
+        res.put("opened", opened);
+        call.resolve(res);
+    }
+
     @Override
     public void handleOnDestroy() {
+        pauseGraceHandler.removeCallbacks(pauseGraceRunnable);
         if (activePlugin == this) activePlugin = null;
         if (activeSession == mediaSession) activeSession = null;
+        MediaPlaybackService.stop(getContext());
         try {
             if (wakeLock != null && wakeLock.isHeld()) {
                 wakeLock.release();
             }
         } catch (Exception ignored) {
         }
+        Context appContext = getContext().getApplicationContext();
         try {
-            getContext().unregisterReceiver(receiver);
+            appContext.unregisterReceiver(receiver);
         } catch (Exception ignored) {
         }
         try {
-            getContext().unregisterReceiver(noisyReceiver);
+            appContext.unregisterReceiver(noisyReceiver);
         } catch (Exception ignored) {
         }
         if (mediaSession != null) {
