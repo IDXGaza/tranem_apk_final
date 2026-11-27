@@ -29,14 +29,14 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Accept Android SDK Licenses
         run: |
           yes | sdkmanager --licenses || true
 
       - name: Install Capacitor CLI
-        run: npm install -g @capacitor/cli
+        run: npm install -g @capacitor/cli@^7.0.0
 
       - name: Backup Custom Native Android Source
         run: |
