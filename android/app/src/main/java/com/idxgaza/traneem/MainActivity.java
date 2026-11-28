@@ -17,6 +17,22 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
 
         try {
+            int darkBg = android.graphics.Color.parseColor("#020617");
+            getWindow().getDecorView().setBackgroundColor(darkBg);
+            if (android.os.Build.VERSION.SDK_INT < 35) {
+                getWindow().setStatusBarColor(darkBg);
+                getWindow().setNavigationBarColor(darkBg);
+            }
+            androidx.core.view.WindowInsetsControllerCompat insetsController =
+                androidx.core.view.WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+            if (insetsController != null) {
+                insetsController.setAppearanceLightStatusBars(false);
+                insetsController.setAppearanceLightNavigationBars(false);
+            }
+        } catch (Exception ignored) {
+        }
+
+        try {
             if (this.bridge != null && this.bridge.getWebView() != null) {
                 WebSettings settings = this.bridge.getWebView().getSettings();
                 settings.setMediaPlaybackRequiresUserGesture(false);

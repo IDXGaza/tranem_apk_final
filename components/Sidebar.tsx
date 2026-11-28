@@ -299,7 +299,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         }}
         className={`${className || 'fixed inset-y-0 right-0 h-full w-[85%] sm:w-[400px] shadow-[0_0_50px_rgba(0,0,0,0.3)] dark:shadow-[0_0_60px_rgba(0,0,0,0.6)] z-[200]'} h-full bg-white dark:bg-slate-950 border-l border-slate-200 dark:border-slate-800 flex flex-col ${isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
       >
-        <div className="pt-6 px-6 pb-2 shrink-0 space-y-4">
+        <div className="pt-[calc(env(safe-area-inset-top,0px)+1.5rem)] px-6 pb-2 shrink-0 space-y-4">
           <div className="flex items-center justify-between pb-1">
             <h1 className="text-3xl font-black text-[#4da8ab] tracking-tight">ترانيم</h1>
             <button onClick={onClose} className="p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all">

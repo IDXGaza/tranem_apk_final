@@ -2561,45 +2561,47 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       )}
 
       {/* الهيدر العلوي */}
-      <header className="flex items-center justify-between p-4 bg-white/70 dark:bg-slate-950/70 backdrop-blur-xl border-b border-slate-200/50 dark:border-slate-800/50 shrink-0 z-[100] relative">
-        <div className="flex items-center gap-1 md:gap-3">
-          {!isRecording && (
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-[#4da8ab] active:scale-95 transition-transform">
-              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" /></svg>
-            </button>
-          )}
-        </div>
-
-        <h1 className="text-xl md:text-2xl font-black text-[#4da8ab] absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">ترانيم</h1>
-
-        <div className="flex items-center gap-1 md:gap-3">
-          <button
-            onClick={() => setIsHeadphonesModalOpen(true)}
-            className={`p-2 rounded-xl transition-all flex items-center justify-center relative ${
-              isHeadsetConnected
-                ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20 ring-1 ring-[#4da8ab]/30'
-                : 'text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-            title="التحكم بالسماعات ومخارج الصوت"
-          >
-            <Headphones className="w-5 h-5" />
-            {isHeadsetConnected && (
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900 animate-pulse" />
+      <header className="sticky top-0 pt-[env(safe-area-inset-top,0px)] bg-white/85 dark:bg-slate-950/90 backdrop-blur-xl border-b border-slate-200/50 dark:border-slate-800/60 shrink-0 z-[100] shadow-sm">
+        <div className="relative flex items-center justify-between px-4 h-14 md:h-16">
+          <div className="flex items-center gap-1 md:gap-3">
+            {!isRecording && (
+              <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-[#4da8ab] active:scale-95 transition-transform">
+                <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" /></svg>
+              </button>
             )}
-          </button>
+          </div>
 
-          <UserBadge
-            tracks={tracks}
-            onOpenBackup={(mode) => {
-              setBackupModalMode(mode || null);
-              setIsDriveModalOpen(true);
-            }}
-            onShareApp={handleShare}
-            storagePersisted={storagePersisted}
-            isBackgroundOptimized={isBackgroundOptimized}
-            onRequestBackgroundPermission={requestBackgroundPlaybackPermission}
-            onOpenBatterySettings={openNativeBatterySettings}
-          />
+          <h1 className="text-xl md:text-2xl font-black text-[#4da8ab] absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">ترانيم</h1>
+
+          <div className="flex items-center gap-1 md:gap-3">
+            <button
+              onClick={() => setIsHeadphonesModalOpen(true)}
+              className={`p-2 rounded-xl transition-all flex items-center justify-center relative ${
+                isHeadsetConnected
+                  ? 'text-[#4da8ab] bg-[#4da8ab]/10 hover:bg-[#4da8ab]/20 ring-1 ring-[#4da8ab]/30'
+                  : 'text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+              title="التحكم بالسماعات ومخارج الصوت"
+            >
+              <Headphones className="w-5 h-5" />
+              {isHeadsetConnected && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-slate-900 animate-pulse" />
+              )}
+            </button>
+
+            <UserBadge
+              tracks={tracks}
+              onOpenBackup={(mode) => {
+                setBackupModalMode(mode || null);
+                setIsDriveModalOpen(true);
+              }}
+              onShareApp={handleShare}
+              storagePersisted={storagePersisted}
+              isBackgroundOptimized={isBackgroundOptimized}
+              onRequestBackgroundPermission={requestBackgroundPlaybackPermission}
+              onOpenBatterySettings={openNativeBatterySettings}
+            />
+          </div>
         </div>
       </header>
 

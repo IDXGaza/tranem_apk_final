@@ -74,7 +74,7 @@ export const UserBadge: React.FC<UserBadgeProps> = ({
                 dir="rtl"
               >
               {/* Drawer Header */}
-              <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100 dark:border-slate-900 bg-white dark:bg-slate-950/80 backdrop-blur shrink-0">
+              <div className="flex items-center justify-between px-6 pt-[calc(env(safe-area-inset-top,0px)+1.25rem)] pb-5 border-b border-slate-100 dark:border-slate-900 bg-white dark:bg-slate-950/80 backdrop-blur shrink-0">
                 <div className="flex items-center gap-2.5">
                   <Settings className="w-5 h-5 text-[#4da8ab]" />
                   <h2 className="text-base font-black text-slate-900 dark:text-slate-100">
