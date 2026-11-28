@@ -11,9 +11,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -50,15 +48,12 @@ public class MediaSessionPlugin extends Plugin {
     private MediaSessionCompat mediaSession = null;
     private final String CHANNEL_ID = "traneem_media";
     private final int NOTIFICATION_ID = 1;
-    private AudioFocusRequest audioFocusRequest = null;
     private PowerManager.WakeLock wakeLock = null;
-    private long lastFocusRequestedTime = 0L;
     private final Handler pauseGraceHandler = new Handler(Looper.getMainLooper());
     private final Runnable pauseGraceRunnable = new Runnable() {
         @Override
         public void run() {
             if (!lastIsPlaying) {
-                abandonAudioFocusInternal();
                 try {
                     if (wakeLock != null && wakeLock.isHeld()) {
                         wakeLock.release();
@@ -74,7 +69,6 @@ public class MediaSessionPlugin extends Plugin {
         public void onReceive(Context context, Intent intent) {
             if (intent == null || intent.getAction() == null) return;
             String action = intent.getAction();
-            requestAudioFocusInternal();
             if (mediaSession != null) mediaSession.setActive(true);
 
             if ("com.idxgaza.traneem.MEDIA_PREVIOUS".equals(action)) {
@@ -225,7 +219,6 @@ public class MediaSessionPlugin extends Plugin {
 
             @Override
             public void onPlay() {
-                requestAudioFocusInternal();
                 if (mediaSession != null) mediaSession.setActive(true);
                 JSObject obj = new JSObject();
                 obj.put("action", "play");
@@ -307,7 +300,11 @@ public class MediaSessionPlugin extends Plugin {
 
         try {
             IntentFilter noisyFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-            appContext.registerReceiver(noisyReceiver, noisyFilter);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(noisyReceiver, noisyFilter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                appContext.registerReceiver(noisyReceiver, noisyFilter);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -533,75 +530,6 @@ public class MediaSessionPlugin extends Plugin {
         call.resolve();
     }
 
-    private void requestAudioFocusInternal() {
-        try {
-            lastFocusRequestedTime = System.currentTimeMillis();
-            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-            if (am == null) return;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                if (audioFocusRequest == null) {
-                    AudioAttributes playbackAttributes = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build();
-                    audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(playbackAttributes)
-                        .setAcceptsDelayedFocusGain(true)
-                        .setOnAudioFocusChangeListener(new AudioManager.OnAudioFocusChangeListener() {
-                            @Override
-                            public void onAudioFocusChange(int focusChange) {
-                                long now = System.currentTimeMillis();
-                                if (now - lastFocusRequestedTime < 1500) return;
-
-                                if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
-                                    JSObject obj = new JSObject();
-                                    obj.put("action", "pause");
-                                    notifyListeners("mediaAction", obj);
-                                }
-                            }
-                        })
-                        .build();
-                }
-                am.requestAudioFocus(audioFocusRequest);
-            } else {
-                @SuppressWarnings("deprecation")
-                int res = am.requestAudioFocus(
-                    new AudioManager.OnAudioFocusChangeListener() {
-                        @Override
-                        public void onAudioFocusChange(int focusChange) {
-                            long now = System.currentTimeMillis();
-                            if (now - lastFocusRequestedTime < 1500) return;
-
-                            if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
-                                JSObject obj = new JSObject();
-                                obj.put("action", "pause");
-                                notifyListeners("mediaAction", obj);
-                            }
-                        }
-                    },
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN
-                );
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void abandonAudioFocusInternal() {
-        try {
-            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-            if (am == null) return;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                if (audioFocusRequest != null) {
-                    am.abandonAudioFocusRequest(audioFocusRequest);
-                }
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
     @PluginMethod
     public void updatePlaybackState(PluginCall call) {
         boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
@@ -657,11 +585,10 @@ public class MediaSessionPlugin extends Plugin {
 
         mediaSession.setPlaybackState(playbackState.build());
 
-        // Background playback guard via Partial WakeLock, AudioFocus, and pause grace period
+        // Background playback guard via Partial WakeLock and pause grace period
         try {
             if (isPlaying) {
                 pauseGraceHandler.removeCallbacks(pauseGraceRunnable);
-                requestAudioFocusInternal();
                 if (wakeLock == null) {
                     PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
                     if (pm != null) {
@@ -673,7 +600,7 @@ public class MediaSessionPlugin extends Plugin {
                     wakeLock.acquire(12 * 60 * 60 * 1000L);
                 }
             } else {
-                // Keep WakeLock and AudioFocus for 15s grace window across track transitions or brief pauses
+                // Keep WakeLock for 15s grace window across track transitions or brief pauses
                 pauseGraceHandler.removeCallbacks(pauseGraceRunnable);
                 pauseGraceHandler.postDelayed(pauseGraceRunnable, 15000);
             }

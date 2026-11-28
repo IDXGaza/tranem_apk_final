@@ -52,6 +52,7 @@ import {
   updateTracksMetaCache,
   ensureStoragePersistence
 } from './services/db';
+import { transcodeNonSeekableBlobToWav } from './utils/wavEncoder';
 
 const UNIFORM_PLACEHOLDER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=600&h=600&auto=format&fit=crop";
 
@@ -799,6 +800,11 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
   const isSeekingRef = useRef<boolean>(false);
   const seekGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectionRequestIdRef = useRef<number>(0);
+  const userPausedRef = useRef<boolean>(false);
+  const lastSeekTimeRef = useRef<number>(0);
+  const lastVisibilityChangeRef = useRef<number>(0);
+  const webmRepairedIdsRef = useRef<Set<string>>(new Set());
+  const webmRepairInFlightRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const soundProfileRef = useRef<SoundProfile>(soundProfile);
   const customEqRef = useRef<CustomEqSettings>(customEq);
 
@@ -829,29 +835,104 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
 
   const currentTrack = currentTrackIndex !== null ? tracks[currentTrackIndex] : null;
 
-  const resolveTrackPlayUrl = useCallback(async (track: Track): Promise<string | null> => {
-    if (track.url && track.url.startsWith('blob:') && track.fileBlob) {
+  const repairWebmBlobIfNeeded = useCallback(async (
+    track: Track,
+    blob: Blob,
+    extraCover?: { coverBlob: Blob; coverUrl: string }
+  ): Promise<string> => {
+    const mime = (blob.type || '').toLowerCase();
+    const needsRepair =
+      (mime.includes('webm') || (track.sourceType === 'record' && mime.includes('ogg'))) &&
+      blob.size > 0 &&
+      blob.size < 45 * 1024 * 1024 &&
+      !webmRepairedIdsRef.current.has(track.id);
+
+    if (!needsRepair) {
+      if (track.url && track.url.startsWith('blob:') && track.fileBlob === blob && !extraCover) {
+        return track.url;
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      setTracks(prev => prev.map(t => t.id === track.id ? {
+        ...t,
+        fileBlob: blob,
+        url: blobUrl,
+        ...(extraCover || {})
+      } : t));
+      return blobUrl;
+    }
+
+    const inFlight = webmRepairInFlightRef.current.get(track.id);
+    if (inFlight) {
+      const url = await inFlight;
+      if (url) return url;
+    }
+
+    const repairPromise = (async (): Promise<string | null> => {
+      try {
+        const transcoded = await transcodeNonSeekableBlobToWav(blob);
+        if (transcoded && transcoded.blob.size > 44) {
+          webmRepairedIdsRef.current.add(track.id);
+          const repairedFile = new File(
+            [transcoded.blob],
+            `${track.name || 'recording'}.wav`,
+            { type: 'audio/wav' }
+          );
+          const repairedUrl = URL.createObjectURL(repairedFile);
+          const exactDuration = transcoded.duration > 0 ? transcoded.duration : track.duration;
+          const latestTrack = tracksRef.current.find(t => t.id === track.id) || track;
+          const updatedTrack: Track = {
+            ...latestTrack,
+            fileBlob: repairedFile,
+            url: repairedUrl,
+            duration: exactDuration,
+            ...(extraCover || {}),
+            lastModified: new Date().toISOString()
+          };
+          setTracks(prev => prev.map(t => t.id === track.id ? updatedTrack : t));
+          saveTrackToDB(updatedTrack).catch(() => {});
+          return repairedUrl;
+        }
+      } catch (err) {
+        console.warn('WebM seekable repair failed, using original blob:', err);
+      } finally {
+        webmRepairInFlightRef.current.delete(track.id);
+      }
+      return null;
+    })();
+
+    webmRepairInFlightRef.current.set(track.id, repairPromise);
+    const repairedUrl = await repairPromise;
+    if (repairedUrl) return repairedUrl;
+
+    if (track.url && track.url.startsWith('blob:') && !extraCover) {
       return track.url;
     }
+    const fallbackUrl = URL.createObjectURL(blob);
+    setTracks(prev => prev.map(t => t.id === track.id ? {
+      ...t,
+      fileBlob: blob,
+      url: fallbackUrl,
+      ...(extraCover || {})
+    } : t));
+    return fallbackUrl;
+  }, []);
+
+  const resolveTrackPlayUrl = useCallback(async (track: Track): Promise<string | null> => {
     if (track.fileBlob) {
       try {
-        const blobUrl = URL.createObjectURL(track.fileBlob);
-        setTracks(prev => prev.map(t => t.id === track.id ? { ...t, url: blobUrl } : t));
-        return blobUrl;
+        return await repairWebmBlobIfNeeded(track, track.fileBlob);
       } catch (e) {}
+    }
+    if (track.url && track.url.startsWith('blob:')) {
+      return track.url;
     }
     try {
       const full = await getTrackFromDB(track.id);
       if (full?.fileBlob) {
-        const blobUrl = URL.createObjectURL(full.fileBlob);
-        const coverUrl = full.coverBlob ? URL.createObjectURL(full.coverBlob) : undefined;
-        setTracks(prev => prev.map(t => t.id === track.id ? {
-          ...t,
-          fileBlob: full.fileBlob,
-          url: blobUrl,
-          ...(coverUrl ? { coverBlob: full.coverBlob, coverUrl } : {})
-        } : t));
-        return blobUrl;
+        const coverExtra = full.coverBlob
+          ? { coverBlob: full.coverBlob, coverUrl: URL.createObjectURL(full.coverBlob) }
+          : undefined;
+        return await repairWebmBlobIfNeeded(track, full.fileBlob, coverExtra);
       }
     } catch (e) {
       console.warn("Failed to hydrate track audio from DB:", e);
@@ -859,7 +940,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     if (track.audioUrl) return track.audioUrl;
     if (track.url && !track.url.startsWith('blob:')) return track.url;
     return null;
-  }, []);
+  }, [repairWebmBlobIfNeeded]);
 
   // Sync <audio> source imperatively ONLY when active track ID changes and is not already loaded
   useEffect(() => {
@@ -975,6 +1056,8 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
 
   const handleStartRecording = () => {
     if (playerState.isPlaying && audioRef.current) {
+      userPausedRef.current = true;
+      isPlayingRef.current = false;
       audioRef.current.pause();
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
     }
@@ -1375,8 +1458,8 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       ? track.coverUrl
       : UNIFORM_PLACEHOLDER;
 
-    // Web MediaSession
-    if ('mediaSession' in navigator) {
+    // Web MediaSession (disabled on native Android APK so MediaSessionPlugin owns the sole system MediaSession)
+    if (!Capacitor.isNativePlatform() && 'mediaSession' in navigator) {
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: track.name,
@@ -1440,12 +1523,14 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    lastPlayRequestedTimeRef.current = Date.now();
+    const now = Date.now();
+    lastPlayRequestedTimeRef.current = now;
+    lastSeekTimeRef.current = now;
     isSeekingRef.current = true;
     if (seekGuardTimerRef.current) clearTimeout(seekGuardTimerRef.current);
     seekGuardTimerRef.current = setTimeout(() => {
       isSeekingRef.current = false;
-    }, 1200);
+    }, 1500);
 
     initAudioCtx();
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
@@ -1465,14 +1550,33 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       ? Math.max(0, Math.min(targetTime, Math.max(0, maxDur - 0.05)))
       : Math.max(0, targetTime);
 
-    const needsLoad = track && (loadedTrackIdRef.current !== track.id || !audio.src || audio.src === '' || audio.src === window.location.href || audio.error !== null);
+    const isUnrepairedWebm = Boolean(
+      track?.fileBlob &&
+      (track.fileBlob.type || '').toLowerCase().includes('webm') &&
+      !webmRepairedIdsRef.current.has(track.id)
+    );
+    const needsLoad = track && (
+      isUnrepairedWebm ||
+      loadedTrackIdRef.current !== track.id ||
+      !audio.src ||
+      audio.src === '' ||
+      audio.src === window.location.href ||
+      audio.error !== null
+    );
     if (needsLoad && track) {
       loadedTrackIdRef.current = track.id;
       pendingSeekTimeRef.current = clampedTime;
       const playUrl = await resolveTrackPlayUrl(track);
-      if (playUrl && loadedTrackIdRef.current === track.id) {
+      if (playUrl && loadedTrackIdRef.current === track.id && audio.src !== playUrl) {
         audio.src = playUrl;
         audio.load();
+      } else if (audio.readyState >= 1) {
+        pendingSeekTimeRef.current = null;
+        try {
+          audio.currentTime = clampedTime;
+        } catch (e) {
+          pendingSeekTimeRef.current = clampedTime;
+        }
       }
     } else if (audio.readyState < 1) {
       pendingSeekTimeRef.current = clampedTime;
@@ -1488,6 +1592,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     currentPositionRef.current = clampedTime;
     const shouldPlay = forcePlay ?? isPlayingRef.current;
     if (forcePlay) {
+      userPausedRef.current = false;
       isPlayingRef.current = true;
     }
     setPlayerState(prev => ({
@@ -1526,6 +1631,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
   }, [seekToTime]);
 
   const handlePause = useCallback(() => {
+    userPausedRef.current = true;
     const audio = audioRef.current;
     if (audio) {
       if (isFinite(audio.currentTime) && audio.currentTime > 0) {
@@ -1539,6 +1645,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
   }, [updateMediaSession]);
 
   const handlePlay = useCallback(async () => {
+    userPausedRef.current = false;
     lastPlayRequestedTimeRef.current = Date.now();
     const audio = audioRef.current;
     if (!audio) return;
@@ -1619,6 +1726,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     if (!track) return;
 
     const reqId = ++selectionRequestIdRef.current;
+    userPausedRef.current = false;
     isTransitioningTrackRef.current = true;
     isSeekingRef.current = false;
     pendingSeekTimeRef.current = null;
@@ -1689,7 +1797,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       if (selectionRequestIdRef.current === reqId) {
         isTransitioningTrackRef.current = false;
       }
-    }, 2500);
+    }, 3500);
   }, [initAudioCtx, resolveTrackPlayUrl, updateMediaSession, triggerBackgroundAndNotificationPermissionIfNeeded]);
 
   const handleShuffle = useCallback(() => {
@@ -1835,9 +1943,9 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     }
   }, [handlePause, handlePlay, handleSkipToNext, handleSelectTrack, handleSkip, handleSeek, handleShuffle]);
 
-  // Media Session logic
+  // Web Media Session logic (only in browser; native Android uses MediaSessionPlugin)
   useEffect(() => {
-    if (!('mediaSession' in navigator) || !currentTrack) return;
+    if (Capacitor.isNativePlatform() || !('mediaSession' in navigator) || !currentTrack) return;
 
     const setupMediaSession = () => {
       try {
@@ -2061,8 +2169,10 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     const audio = audioRef.current;
     if (!audio) return;
 
+    const isNative = Capacitor.isNativePlatform();
+
     const updateMediaSessionPosition = () => {
-      if ('mediaSession' in navigator && audio && !isNaN(audio.duration)) {
+      if (!isNative && 'mediaSession' in navigator && audio && !isNaN(audio.duration)) {
         try {
           navigator.mediaSession.setPositionState({
             duration: audio.duration,
@@ -2085,7 +2195,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       }
       setPlayerState(prev => ({ ...prev, currentTime: audio.currentTime }));
 
-      if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+      if (!isNative && 'mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
         try {
           navigator.mediaSession.setPositionState({
             duration: audio.duration,
@@ -2101,6 +2211,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       isSeekingRef.current = false;
       pendingSeekTimeRef.current = null;
       isTransitioningTrackRef.current = true;
+      userPausedRef.current = false;
       lastPlayRequestedTimeRef.current = Date.now();
       if (isLoopingRef.current) {
         audio.currentTime = 0;
@@ -2120,6 +2231,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     const onPlaying = () => {
       isTransitioningTrackRef.current = false;
       isSeekingRef.current = false;
+      userPausedRef.current = false;
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
         audioCtxRef.current.resume().catch(() => {});
       }
@@ -2129,7 +2241,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
 
       setPlayerState(prev => ({ ...prev, isLoading: false, isPlaying: true }));
       updateMediaSession(true);
-      if ('mediaSession' in navigator) {
+      if (!isNative && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
       updateMediaSessionPosition();
@@ -2139,24 +2251,49 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       // Do NOT treat natural track end, active seeking, or track switching as user pause
       if (
         audio.ended ||
-        audio.seeking ||
-        isSeekingRef.current ||
-        isTransitioningTrackRef.current ||
         (isFinite(audio.duration) && audio.duration > 0 && audio.currentTime >= audio.duration - 0.35)
       ) {
         return;
       }
-      if (Date.now() - lastPlayRequestedTimeRef.current < 1500) {
-        console.log('Ignoring transient audio element pause event right after play/seek');
+
+      const now = Date.now();
+      const isTransientWebViewPause =
+        !userPausedRef.current &&
+        isPlayingRef.current &&
+        (
+          audio.seeking ||
+          isSeekingRef.current ||
+          isTransitioningTrackRef.current ||
+          (now - lastSeekTimeRef.current < 1800) ||
+          (now - lastPlayRequestedTimeRef.current < 1500) ||
+          (now - lastVisibilityChangeRef.current < 2000 && document.visibilityState === 'hidden')
+        );
+
+      if (isTransientWebViewPause) {
+        console.log('Recovering from transient audio element pause event during seek/background transition');
+        setTimeout(() => {
+          if (
+            audioRef.current &&
+            isPlayingRef.current &&
+            !userPausedRef.current &&
+            audioRef.current.paused &&
+            !audioRef.current.ended &&
+            !audioRef.current.seeking
+          ) {
+            lastPlayRequestedTimeRef.current = Date.now();
+            audioRef.current.play().catch(() => {});
+          }
+        }, 80);
         return;
       }
+
       if (isFinite(audio.currentTime)) {
         currentPositionRef.current = audio.currentTime;
       }
       isPlayingRef.current = false;
       setPlayerState(prev => ({ ...prev, isPlaying: false }));
       updateMediaSession(false);
-      if ('mediaSession' in navigator) {
+      if (!isNative && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'paused';
       }
       updateMediaSessionPosition();
@@ -2164,7 +2301,9 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
 
     const onSeeking = () => {
       isSeekingRef.current = true;
-      lastPlayRequestedTimeRef.current = Date.now();
+      const now = Date.now();
+      lastPlayRequestedTimeRef.current = now;
+      lastSeekTimeRef.current = now;
     };
 
     const onSeeked = () => {
@@ -2177,7 +2316,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
         currentPositionRef.current = audio.currentTime;
         setPlayerState(prev => ({ ...prev, currentTime: audio.currentTime, isLoading: false }));
       }
-      if (isPlayingRef.current && audio.paused && !audio.ended) {
+      if (isPlayingRef.current && !userPausedRef.current && audio.paused && !audio.ended) {
         lastPlayRequestedTimeRef.current = Date.now();
         audio.play().catch(() => {});
       }
@@ -2186,7 +2325,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     };
 
     const onStalled = () => {
-      if (isPlayingRef.current && audio.paused && !audio.ended && !isSeekingRef.current) {
+      if (isPlayingRef.current && !userPausedRef.current && audio.paused && !audio.ended && !isSeekingRef.current) {
         lastPlayRequestedTimeRef.current = Date.now();
         audio.play().catch(() => {});
       }
@@ -2204,7 +2343,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
           setPlayerState(prev => ({ ...prev, currentTime: target }));
         } catch (e) {}
       }
-      if (isPlayingRef.current && audio.paused) {
+      if (isPlayingRef.current && !userPausedRef.current && audio.paused) {
         lastPlayRequestedTimeRef.current = Date.now();
         const playPromise = audio.play();
         if (playPromise !== undefined) {
@@ -2259,6 +2398,31 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       setPlayerState(prev => ({ ...prev, isPlaying: false, isLoading: false }));
     };
 
+    const onVisibilityChange = () => {
+      lastVisibilityChangeRef.current = Date.now();
+      if (document.visibilityState === 'hidden' && isPlayingRef.current && !userPausedRef.current) {
+        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+        }
+        updateMediaSession(true);
+        const nudgePlay = () => {
+          if (
+            audioRef.current &&
+            isPlayingRef.current &&
+            !userPausedRef.current &&
+            audioRef.current.paused &&
+            !audioRef.current.ended
+          ) {
+            lastPlayRequestedTimeRef.current = Date.now();
+            audioRef.current.play().catch(() => {});
+          }
+        };
+        nudgePlay();
+        setTimeout(nudgePlay, 150);
+        setTimeout(nudgePlay, 500);
+      }
+    };
+
     audio.addEventListener('timeupdate', updateTime);
     audio.addEventListener('ended', onEnded);
     audio.addEventListener('waiting', onWaiting);
@@ -2270,6 +2434,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
     audio.addEventListener('canplay', onCanPlay);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('error', onError);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       audio.removeEventListener('timeupdate', updateTime);
@@ -2283,6 +2448,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       audio.removeEventListener('canplay', onCanPlay);
       audio.removeEventListener('loadedmetadata', onLoadedMetadata);
       audio.removeEventListener('error', onError);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [currentTrackIndex, tracks.length, updateMediaSession]);
 
@@ -2417,6 +2583,7 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
       updateTracksMetaCache(updated);
       return updated;
     });
+    userPausedRef.current = false;
     isPlayingRef.current = true;
     lastPlayRequestedTimeRef.current = Date.now();
     setPlayerState(ps => ({...ps, isPlaying: true, currentTime: 0}));
@@ -2437,6 +2604,8 @@ const optimizeWavAudioForBackup = async (blob: Blob): Promise<Blob> => {
 
     // If deleting the currently playing track, pause it first to flush stats and clear intervals safely
     if (currentTrackIndex === trackIndexToRemove) {
+      userPausedRef.current = true;
+      isPlayingRef.current = false;
       if (audioRef.current) {
         audioRef.current.pause();
       }

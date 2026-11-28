@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
+import { encodeAudioBufferToWavBlob } from '../utils/wavEncoder';
 
 const VoiceRecorderPlugin = registerPlugin<any>('VoiceRecorder');
 const getVoiceRecorder = () => {
@@ -221,23 +222,40 @@ export const useAudioRecorder = (onImport: (file: File, durationOverride?: numbe
         const date = new Date();
         const dateStr = `${date.getFullYear()}-${(date.getMonth()+1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
         let duration = recordingTimeRef.current;
-        
-        try {
-          // Fast decode just to get the exact duration
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const arrayBuffer = await rawBlob.arrayBuffer();
-          const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-          duration = audioBuffer.duration;
-        } catch (err) {
-          console.warn("Could not decode audio duration via Web Audio, using elapsed timer", err);
-        }
 
+        let finalBlob: Blob = rawBlob;
+        let finalMimeType = recordedMimeType;
         let extension = 'webm';
         if (recordedMimeType.includes('mp4') || recordedMimeType.includes('m4a')) extension = 'm4a';
         else if (recordedMimeType.includes('ogg')) extension = 'ogg';
         else if (recordedMimeType.includes('aac')) extension = 'aac';
+
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        let tempCtx: AudioContext | null = null;
+        try {
+          if (AudioCtx) {
+            tempCtx = new AudioCtx();
+            const arrayBuffer = await rawBlob.arrayBuffer();
+            const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+            if (isFinite(audioBuffer.duration) && audioBuffer.duration > 0) {
+              duration = audioBuffer.duration;
+            }
+            const wavBlob = await encodeAudioBufferToWavBlob(audioBuffer, 22050);
+            if (wavBlob.size > 44) {
+              finalBlob = wavBlob;
+              finalMimeType = 'audio/wav';
+              extension = 'wav';
+            }
+          }
+        } catch (err) {
+          console.warn("Could not encode recording to seekable WAV, using raw blob", err);
+        } finally {
+          if (tempCtx && tempCtx.state !== 'closed') {
+            tempCtx.close().catch(() => {});
+          }
+        }
         
-        const file = new File([rawBlob], `تسجيل صوتي - ${dateStr}.${extension}`, { type: recordedMimeType });
+        const file = new File([finalBlob], `تسجيل صوتي - ${dateStr}.${extension}`, { type: finalMimeType });
         onImport(file, duration);
 
         stream.getTracks().forEach(track => track.stop()); // Stop microphone
