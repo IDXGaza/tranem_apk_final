@@ -444,7 +444,7 @@ public class MediaSessionPlugin extends Plugin {
         final Bitmap targetBitmap = instantBitmap;
 
         // Immediate UI update with target cover bitmap
-        getActivity().runOnUiThread(new Runnable() {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
                 if (currentReqId != artworkRequestId) return;
@@ -499,7 +499,7 @@ public class MediaSessionPlugin extends Plugin {
 
                     if (bitmap != null) {
                         final Bitmap finalBitmap = bitmap;
-                        getActivity().runOnUiThread(new Runnable() {
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
                             @Override
                             public void run() {
                                 if (currentReqId != artworkRequestId) return;

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Heart, 
   Repeat, 
@@ -34,33 +34,84 @@ const formatTime = (time: number) => {
 const Player: React.FC<PlayerProps> = ({ 
   track, state, onPlayPause, onSeek, onSkip, onToggleFavorite, onToggleLoop, onAddTimestamp, hasError 
 }) => {
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragValue, setDragValue] = useState(0);
+  const isDraggingRef = useRef(false);
+  const dragValueRef = useRef(0);
+
+  useEffect(() => {
+    setIsDragging(false);
+    isDraggingRef.current = false;
+  }, [track?.id]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const commitDrag = () => {
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      setIsDragging(false);
+      onSeek(dragValueRef.current);
+    };
+    window.addEventListener('pointerup', commitDrag);
+    window.addEventListener('pointercancel', commitDrag);
+    window.addEventListener('touchend', commitDrag);
+    window.addEventListener('mouseup', commitDrag);
+    return () => {
+      window.removeEventListener('pointerup', commitDrag);
+      window.removeEventListener('pointercancel', commitDrag);
+      window.removeEventListener('touchend', commitDrag);
+      window.removeEventListener('mouseup', commitDrag);
+    };
+  }, [isDragging, onSeek]);
+
   if (!track) return null;
 
-  const safeDuration = track.duration && isFinite(track.duration) && !isNaN(track.duration) ? track.duration : Math.max(state.currentTime, 100);
+  const safeDuration = track.duration && isFinite(track.duration) && !isNaN(track.duration) && track.duration > 0
+    ? track.duration
+    : Math.max(state.currentTime, 100);
+  const displayedTime = Math.min(safeDuration, Math.max(0, isDragging ? dragValue : state.currentTime));
+  const progressPct = safeDuration > 0 ? Math.min(100, Math.max(0, (displayedTime / safeDuration) * 100)) : 0;
+
+  const startDrag = () => {
+    isDraggingRef.current = true;
+    dragValueRef.current = displayedTime;
+    setDragValue(displayedTime);
+    setIsDragging(true);
+  };
   
   return (
     <div className={`w-full flex flex-col py-4 px-4 sm:px-6 md:px-10 transition-all duration-500 relative ${hasError ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
 
       <div className="w-full flex items-center gap-3 mb-3">
         <span className="text-[9px] md:text-[10px] font-black text-slate-400 dark:text-slate-500 tabular-nums w-8 text-right">
-          {formatTime(state.currentTime)}
+          {formatTime(displayedTime)}
         </span>
         <div className="flex-1 relative h-6 flex items-center touch-none group">
           <input 
-            type="range" min={0} max={safeDuration} value={state.currentTime} 
-            onChange={(e) => onSeek(Number(e.target.value))}
+            type="range" min={0} max={safeDuration} step={0.1} value={displayedTime}
+            onPointerDown={startDrag}
+            onTouchStart={startDrag}
+            onMouseDown={startDrag}
+            onChange={(e) => {
+              const nextVal = Number(e.target.value);
+              dragValueRef.current = nextVal;
+              setDragValue(nextVal);
+              if (!isDraggingRef.current) {
+                onSeek(nextVal);
+              }
+            }}
             className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20"
-            disabled={hasError || state.isLoading}
+            disabled={hasError}
           />
           <div className="w-full h-1.5 bg-slate-100/50 dark:bg-slate-800/50 rounded-full relative overflow-hidden">
             <div 
-              className={`absolute right-0 top-0 h-full bg-[#4da8ab] rounded-full transition-all duration-200 ${state.isLoading ? 'animate-pulse' : ''}`} 
-              style={{ width: `${(state.currentTime / safeDuration) * 100}%` }} 
+              className={`absolute right-0 top-0 h-full bg-[#4da8ab] rounded-full ${isDragging ? '' : 'transition-all duration-200'} ${state.isLoading ? 'animate-pulse' : ''}`} 
+              style={{ width: `${progressPct}%` }} 
             />
           </div>
           <div 
-            className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white dark:bg-slate-100 border-2 border-[#4da8ab] rounded-full shadow-md pointer-events-none transition-all group-hover:scale-125"
-            style={{ right: `calc(${(state.currentTime / safeDuration) * 100}% - 7px)` }}
+            className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white dark:bg-slate-100 border-2 border-[#4da8ab] rounded-full shadow-md pointer-events-none ${isDragging ? 'scale-125' : 'transition-all group-hover:scale-125'}`}
+            style={{ right: `calc(${progressPct}% - 7px)` }}
           />
         </div>
         <span className="text-[9px] md:text-[10px] font-black text-slate-400 dark:text-slate-500 tabular-nums w-8 text-left">
@@ -80,7 +131,7 @@ const Player: React.FC<PlayerProps> = ({
         </div>
 
         <div className="flex items-center justify-center gap-2 sm:gap-4 md:gap-8">
-          <button onClick={() => onSkip(-10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
+          <button onClick={() => onSkip(-10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError}>
             <RotateCw className="w-5 h-5 md:w-7 md:h-7" strokeWidth={2.5} />
             <span className="text-[8px] font-black mt-0.5">10</span>
           </button>
@@ -95,7 +146,7 @@ const Player: React.FC<PlayerProps> = ({
             )}
           </button>
 
-          <button onClick={() => onSkip(10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError || state.isLoading}>
+          <button onClick={() => onSkip(10)} className="text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 p-1.5 sm:p-2 active:scale-90 transition-all flex flex-col items-center justify-center" disabled={hasError}>
             <RotateCcw className="w-5 h-5 md:w-7 md:h-7" strokeWidth={2.5} />
             <span className="text-[8px] font-black mt-0.5">10</span>
           </button>
